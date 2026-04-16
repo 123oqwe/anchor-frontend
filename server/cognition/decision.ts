@@ -6,7 +6,7 @@
  * No HTTP, no DB writes, no side effects.
  */
 import { text } from "../infra/compute/index.js";
-import { serializeForPrompt as graphPrompt, serializeStateForPrompt } from "../graph/reader.js";
+import { serializeForPrompt as graphPrompt, serializeStateForPrompt, serializeEdgesForPrompt } from "../graph/reader.js";
 import { serializeForPrompt as memoryPrompt, serializeTwinForPrompt } from "../memory/retrieval.js";
 
 export interface DecisionResult {
@@ -28,6 +28,8 @@ const DECISION_SYSTEM_PROMPT = `You are Anchor's Decision Agent. You know the us
 
 HUMAN GRAPH:
 {GRAPH}
+
+{EDGES}
 
 BEHAVIORAL MEMORY:
 {MEMORY}
@@ -61,6 +63,7 @@ function buildSystemPrompt(): string {
   return DECISION_SYSTEM_PROMPT
     .replace("{STATE}", serializeStateForPrompt())
     .replace("{GRAPH}", graphPrompt())
+    .replace("{EDGES}", serializeEdgesForPrompt())
     .replace("{MEMORY}", memoryPrompt())
     .replace("{TWIN}", serializeTwinForPrompt());
 }

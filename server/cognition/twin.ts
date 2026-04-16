@@ -8,6 +8,7 @@ import { db, DEFAULT_USER_ID } from "../infra/storage/db.js";
 import { bus, type StepChange } from "../orchestration/bus.js";
 import { text } from "../infra/compute/index.js";
 import { writeMemory, writeTwinInsight } from "../memory/retrieval.js";
+import { createNode } from "../graph/writer.js";
 
 function log(agent: string, action: string, status = "success") {
   db.prepare("INSERT INTO agent_executions (id, user_id, agent, action, status) VALUES (?,?,?,?,?)")
@@ -40,6 +41,9 @@ export async function twinLearnFromEdits(changes: StepChange[]) {
     const parsed = JSON.parse(jsonMatch[0]);
     if (parsed?.insight) {
       writeTwinInsight({ category: parsed.category ?? "behavior", insight: parsed.insight, confidence: parsed.confidence ?? 0.7 });
+      // L1 writeback: Twin insight → graph node (preference or behavioral_pattern)
+      const nodeType = (parsed.category ?? "").includes("preference") ? "preference" : "behavioral_pattern";
+      createNode({ domain: "growth", label: parsed.insight.slice(0, 60), type: nodeType, status: "active", captured: "Twin Agent inference", detail: parsed.insight });
       log("Twin Agent", `Edit insight: ${parsed.insight.slice(0, 60)}`);
       bus.publish({ type: "TWIN_UPDATED", payload: { insight: parsed.insight } });
     }

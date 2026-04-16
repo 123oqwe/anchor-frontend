@@ -7,7 +7,7 @@
  */
 import { db, DEFAULT_USER_ID } from "../infra/storage/db.js";
 import { nanoid } from "nanoid";
-import { type NodeType, type Domain } from "./ontology.js";
+import { type NodeType, type EdgeType, type Domain } from "./ontology.js";
 
 // ── Node mutations ──────────────────────────────────────────────────────────
 
@@ -66,4 +66,22 @@ export function unlockBlockedNodes(): number {
     "UPDATE graph_nodes SET status='todo', updated_at=datetime('now') WHERE user_id=? AND status='blocked'"
   ).run(DEFAULT_USER_ID);
   return result.changes;
+}
+
+// ── Edge mutations ──────────────────────────────────────────────────────────
+
+export function createEdge(fromNodeId: string, toNodeId: string, type: EdgeType | string, weight = 1.0, metadata?: string): string {
+  const id = nanoid();
+  db.prepare(
+    "INSERT INTO graph_edges (id, user_id, from_node_id, to_node_id, type, weight, metadata) VALUES (?,?,?,?,?,?,?)"
+  ).run(id, DEFAULT_USER_ID, fromNodeId, toNodeId, type, weight, metadata ?? null);
+  return id;
+}
+
+export function deleteEdge(edgeId: string): boolean {
+  return db.prepare("DELETE FROM graph_edges WHERE id=? AND user_id=?").run(edgeId, DEFAULT_USER_ID).changes > 0;
+}
+
+export function deleteEdgesBetween(fromId: string, toId: string): number {
+  return db.prepare("DELETE FROM graph_edges WHERE user_id=? AND from_node_id=? AND to_node_id=?").run(DEFAULT_USER_ID, fromId, toId).changes;
 }

@@ -87,3 +87,50 @@ export function serializeStateForPrompt(): string {
   if (!s) return "";
   return `Current state — Energy: ${s.energy}/100, Focus: ${s.focus}/100, Stress: ${s.stress}/100`;
 }
+
+// ── Edge queries ────────────────────────────────────────────────────────────
+
+export interface EdgeRecord {
+  id: string;
+  fromNodeId: string;
+  toNodeId: string;
+  type: string;
+  weight: number;
+  metadata: string | null;
+}
+
+/** Get all edges from a node. */
+export function getEdgesFrom(nodeId: string): (EdgeRecord & { toLabel: string })[] {
+  return db.prepare(`
+    SELECT e.id, e.from_node_id as fromNodeId, e.to_node_id as toNodeId, e.type, e.weight, e.metadata, n.label as toLabel
+    FROM graph_edges e JOIN graph_nodes n ON e.to_node_id = n.id
+    WHERE e.user_id=? AND e.from_node_id=?
+  `).all(DEFAULT_USER_ID, nodeId) as any[];
+}
+
+/** Get all edges to a node. */
+export function getEdgesTo(nodeId: string): (EdgeRecord & { fromLabel: string })[] {
+  return db.prepare(`
+    SELECT e.id, e.from_node_id as fromNodeId, e.to_node_id as toNodeId, e.type, e.weight, e.metadata, n.label as fromLabel
+    FROM graph_edges e JOIN graph_nodes n ON e.from_node_id = n.id
+    WHERE e.user_id=? AND e.to_node_id=?
+  `).all(DEFAULT_USER_ID, nodeId) as any[];
+}
+
+/** Get all edges (for full graph visualization). */
+export function getAllEdges(): EdgeRecord[] {
+  return db.prepare("SELECT id, from_node_id as fromNodeId, to_node_id as toNodeId, type, weight, metadata FROM graph_edges WHERE user_id=?").all(DEFAULT_USER_ID) as any[];
+}
+
+/** Serialize edges for prompt injection (so Decision Agent knows dependencies). */
+export function serializeEdgesForPrompt(): string {
+  const edges = db.prepare(`
+    SELECT f.label as from_label, t.label as to_label, e.type
+    FROM graph_edges e
+    JOIN graph_nodes f ON e.from_node_id = f.id
+    JOIN graph_nodes t ON e.to_node_id = t.id
+    WHERE e.user_id=?
+  `).all(DEFAULT_USER_ID) as any[];
+  if (edges.length === 0) return "";
+  return "RELATIONSHIPS:\n" + edges.map(e => `  ${e.from_label} —[${e.type}]→ ${e.to_label}`).join("\n");
+}

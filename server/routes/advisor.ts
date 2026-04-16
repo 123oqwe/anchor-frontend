@@ -8,6 +8,8 @@ import { nanoid } from "nanoid";
 import { bus, type EditableStep, type StepChange } from "../orchestration/bus.js";
 import { text } from "../infra/compute/index.js";
 import { decide } from "../cognition/decision.js";
+import { extractFromMessage } from "../cognition/extractor.js";
+import { createNode } from "../graph/writer.js";
 
 const router = Router();
 
@@ -50,6 +52,9 @@ router.post("/personal", async (req: Request, res: Response) => {
 
     logExecution("Decision Agent", `${result.isPlan ? "Plan" : "Advice"}: ${message.substring(0, 60)}`);
 
+    // L1 Graph growth: async extract nodes/edges from user message (non-blocking)
+    extractFromMessage(message).catch(err => console.error("[Extractor] Error:", err.message));
+
     res.json({
       id: msgId, role: result.isPlan ? "draft" : "advisor", content: result.raw,
       timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
@@ -84,6 +89,11 @@ router.post("/confirm", async (req: Request, res: Response) => {
   }
 
   logExecution("Decision Agent", `Plan confirmed: ${user_steps.length} steps, ${changes.filter(c => c.type !== "kept").length} changes`);
+
+  // L1 writeback: record the decision in the graph
+  const stepSummary = user_steps.map((s: any) => s.content).join("; ").slice(0, 100);
+  createNode({ domain: "work", label: `Decision: ${stepSummary}`, type: "decision", status: "active", captured: "Plan confirmed by user", detail: `${user_steps.length} steps confirmed` });
+
   bus.publish({ type: "USER_CONFIRMED", payload: { original_steps, user_steps, changes } });
   res.json({ ok: true, changes });
 });

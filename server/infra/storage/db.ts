@@ -59,6 +59,22 @@ db.exec(`
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
+  CREATE TABLE IF NOT EXISTS graph_edges (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    from_node_id TEXT NOT NULL,
+    to_node_id TEXT NOT NULL,
+    type TEXT NOT NULL,
+    weight REAL NOT NULL DEFAULT 1.0,
+    metadata TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (from_node_id) REFERENCES graph_nodes(id) ON DELETE CASCADE,
+    FOREIGN KEY (to_node_id) REFERENCES graph_nodes(id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_edges_from ON graph_edges(from_node_id);
+  CREATE INDEX IF NOT EXISTS idx_edges_to ON graph_edges(to_node_id);
+
   CREATE TABLE IF NOT EXISTS memories (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
@@ -215,7 +231,39 @@ function seedIfEmpty() {
       [DEFAULT_USER_ID, "health", "Exercise Routine", "task", "inactive", "Calendar gap analysis", "No exercise events detected in 2 weeks. Previously 3x/week."],
     ];
     const ins = db.prepare("INSERT INTO graph_nodes (id, user_id, domain, label, type, status, captured, detail) VALUES (?,?,?,?,?,?,?,?)");
-    for (const n of nodes) ins.run(nanoid(), ...n);
+    const nodeIds: string[] = [];
+    for (const n of nodes) { const id = nanoid(); ins.run(id, ...n); nodeIds.push(id); }
+
+    // Seed edges (relationships between nodes)
+    // nodeIds index matches nodes array order above
+    const insEdge = db.prepare("INSERT INTO graph_edges (id, user_id, from_node_id, to_node_id, type, weight) VALUES (?,?,?,?,?,?)");
+    const seedEdges: [number, number, string, number][] = [
+      // YC Application depends_on Product Roadmap
+      [0, 1, "depends_on", 1.0],
+      // Technical Architecture supports YC Application
+      [2, 0, "supports", 0.8],
+      // Hire CTO supports Product Roadmap
+      [3, 1, "supports", 0.9],
+      // Team Standup supports Product Roadmap
+      [4, 1, "supports", 0.5],
+      // Matt Zhang contextual to Product Roadmap
+      [5, 1, "contextual", 0.7],
+      // Sarah Chen contextual to Pre-Seed Fundraising
+      [6, 9, "contextual", 0.9],
+      // Alex Rivera contextual to Hire CTO
+      [7, 3, "contextual", 0.8],
+      // Pre-Seed Fundraising depends_on YC Application
+      [9, 0, "depends_on", 0.7],
+      // Investor Follow-up supports Pre-Seed Fundraising
+      [10, 9, "supports", 0.8],
+      // Decision Pattern threatens YC Application (avoidance causes delay)
+      [12, 0, "threatens", 0.6],
+    ];
+    for (const [fromIdx, toIdx, type, weight] of seedEdges) {
+      if (nodeIds[fromIdx] && nodeIds[toIdx]) {
+        insEdge.run(nanoid(), DEFAULT_USER_ID, nodeIds[fromIdx], nodeIds[toIdx], type, weight);
+      }
+    }
 
     // Memories
     const mems = [
