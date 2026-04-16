@@ -46,17 +46,17 @@ function fuzzyFindNode(label: string): { id: string; label: string } | null {
   const exact = db.prepare("SELECT id, label FROM graph_nodes WHERE user_id=? AND label=?").get(DEFAULT_USER_ID, label) as any;
   if (exact) return exact;
 
-  // Fuzzy: check if label is contained in existing or vice versa
+  // Containment match: "Kevin" matches "Kevin (a16z)" and vice versa
   const fuzzy = db.prepare("SELECT id, label FROM graph_nodes WHERE user_id=? AND (label LIKE ? OR ? LIKE '%' || label || '%')").get(DEFAULT_USER_ID, `%${label}%`, label) as any;
   if (fuzzy) return fuzzy;
 
-  // Keyword match: split label into words, find node containing key words
-  const words = label.split(/\s+/).filter(w => w.length > 3);
-  if (words.length > 0) {
-    for (const word of words) {
-      const keyMatch = db.prepare("SELECT id, label FROM graph_nodes WHERE user_id=? AND label LIKE ?").get(DEFAULT_USER_ID, `%${word}%`) as any;
-      if (keyMatch) return keyMatch;
-    }
+  // First-word match ONLY (for person names): "Lisa (a16z Seed Program)" → try "Lisa"
+  // Only use this for labels that look like "Name (context)" pattern
+  const nameMatch = label.match(/^([A-Z][a-z]+)\s*\(/);
+  if (nameMatch) {
+    const firstName = nameMatch[1];
+    const byName = db.prepare("SELECT id, label FROM graph_nodes WHERE user_id=? AND label LIKE ?").get(DEFAULT_USER_ID, `${firstName}%`) as any;
+    if (byName) return byName;
   }
 
   return null;
@@ -75,19 +75,29 @@ EXISTING EDGES:
 USER MESSAGE:
 "{MESSAGE}"
 
-CRITICAL RULES:
-1. Only extract REAL information explicitly stated or strongly implied. Never invent.
-2. Labels must be SHORT (≤40 characters). Use the person's name, not a description.
-   GOOD: "David (YC)" BAD: "David from Y Combinator who reviewed our application"
-3. If an existing node matches, use "updates" — do NOT create a duplicate.
-   Match loosely: "David" matches "David (YC)".
-4. NEW PEOPLE → always create a "person" node. If someone is mentioned by name for the first time, they MUST appear in new_nodes.
-5. NEW CONSTRAINTS (deadlines, limits, blockers) → always create a "constraint" node.
-6. NEW PREFERENCES ("I prefer X over Y") → always create a "preference" node.
-7. EDGES ARE IMPORTANT. For every relationship, create an edge. Never create self-referencing edges (from == to).
-   "Runway blocks Series A" → edge. "Sarah supports fundraising" → edge.
-8. For updates, use the EXISTING label exactly as shown above.
-9. Keep total output SHORT. Max 5 new_nodes, 5 updates, 8 edges per extraction.
+CRITICAL RULES �� FOLLOW EVERY ONE:
+
+RULE 1 — PEOPLE: Every person mentioned by name who is NOT already in the existing nodes list MUST be created as a new "person" node. No exceptions. If the message mentions "Lisa", "John", "Kevin" — each one gets a node. Do NOT skip anyone.
+
+RULE 2 — PREFERENCES: If the user says "I prefer X", "I hate Y", "I like Z", "I always X" — you MUST create a new "preference" node. Do NOT fold this into an update of an existing node. Preferences are ALWAYS new nodes.
+
+RULE 3 — CONSTRAINTS: Deadlines, limits, blockers, budget caps — each one MUST be a new "constraint" or "commitment" node.
+
+RULE 4 — OPPORTUNITIES: If someone offers help, makes an intro, or suggests something beneficial — create an "opportunity" node.
+
+RULE 5 — DUPLICATES: Only skip a node if the EXACT person/concept already exists in the existing list. "Lisa" does NOT match "Sarah". When in doubt, CREATE the node.
+
+RULE 6 — LABELS: Short, ≤40 characters. "Kevin (a16z)" not "Kevin from Andreessen Horowitz who I met at dinner".
+
+RULE 7 — UPDATES: For existing nodes, use the EXACT label from the existing list. Only update status or detail, never change the label.
+
+RULE 8 — EDGES: For every meaningful relationship between two nodes, create an edge. Never create self-referencing edges (from == to). Aim for at least 1 edge per new node.
+
+RULE 9 — BIAS: When in doubt, CREATE the node. It is better to have a node you don't need than to miss information. Err on the side of extraction, not omission.
+
+RULE 10 — OUTPUT LIMIT: Max 8 new_nodes, 5 updates, 10 edges.
+
+RULE 11 — COMPACT JSON: Keep "detail" under 60 characters. No long sentences. The shorter your JSON, the less likely it gets truncated.
 
 Node types: identity, goal, project, commitment, task, person, relationship, value, constraint, preference, routine, state, risk, opportunity, decision, resource, artifact, observation, outcome, behavioral_pattern, external_context
 Edge types: depends_on, blocks, aligns_with, conflicts_with, owned_by, temporal, causal, contextual, supports, threatens
@@ -137,7 +147,7 @@ async function doExtraction(combinedMessage: string): Promise<void> {
       task: "graph_extraction",
       system: prompt,
       messages: [{ role: "user", content: "Extract graph information." }],
-      maxTokens: 800,
+      maxTokens: 1200,
     });
 
     // Strip markdown fences if present, then extract JSON
