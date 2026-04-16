@@ -16,7 +16,8 @@ import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { getCandidates, routeTask, TASK_ROUTES } from "./router.js";
-import { PROVIDERS, type Model, type Capability, getModelsForCapability, getActiveProviders, getAllProviderSlots } from "./providers.js";
+import { PROVIDERS, type Model, type Capability } from "./providers.js";
+import { getApiKey, getAllKeyStatuses, getModelsForCapability, getActiveProviders, getAllProviderSlots } from "./keys.js";
 
 // ── Provider factory ────────────────────────────────────────────────────────
 
@@ -24,8 +25,8 @@ function createModelInstance(model: Model) {
   const provider = PROVIDERS.find(p => p.id === model.provider);
   if (!provider) throw new Error(`Provider not found: ${model.provider}`);
 
-  const key = process.env[provider.envKey];
-  if (!key) throw new Error(`API key not set: ${provider.envKey}`);
+  const key = getApiKey(provider.id);
+  if (!key) throw new Error(`API key not set for ${provider.name}`);
 
   switch (provider.protocol) {
     case "anthropic":
@@ -177,9 +178,15 @@ export async function embed(opts: {
 // ── Status / Introspection ──────────────────────────────────────────────────
 
 export function getStatus() {
+  const keyStatuses = getAllKeyStatuses();
   return {
     activeProviders: getActiveProviders().map(p => ({ id: p.id, name: p.name })),
-    providerSlots: getAllProviderSlots(),
+    providerSlots: getAllProviderSlots().map(slot => ({
+      ...slot,
+      keySource: keyStatuses[slot.id]?.source ?? "none",
+      keyMasked: keyStatuses[slot.id]?.masked,
+      keyUpdatedAt: keyStatuses[slot.id]?.updatedAt,
+    })),
     capabilities: (Object.keys(TASK_ROUTES) as string[]).map(task => {
       const route = TASK_ROUTES[task];
       const available = getModelsForCapability(route.capability);

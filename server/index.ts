@@ -19,6 +19,7 @@ import workspaceRoutes from "./routes/workspace.js";
 import twinRoutes from "./routes/twin.js";
 import agentsRoutes from "./routes/agents.js";
 import advisorRoutes from "./routes/advisor.js";
+import adminRoutes from "./routes/admin.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -38,6 +39,7 @@ async function startServer() {
   app.use("/api/twin", twinRoutes);
   app.use("/api/agents", agentsRoutes);
   app.use("/api/advisor", advisorRoutes);
+  app.use("/api/admin", adminRoutes);
 
   // ── Static / SPA ──────────────────────────────────────────────────────────
   const staticPath =

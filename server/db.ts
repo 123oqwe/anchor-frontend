@@ -142,6 +142,12 @@ db.exec(`
     trend TEXT NOT NULL DEFAULT 'stable',
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
+
+  CREATE TABLE IF NOT EXISTS api_keys (
+    provider_id TEXT PRIMARY KEY,
+    api_key TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
 `);
 
 // ─── Default user seed ────────────────────────────────────────────────────────

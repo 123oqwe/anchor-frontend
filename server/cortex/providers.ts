@@ -248,19 +248,5 @@ export function getModel(modelId: string): Model | undefined {
   return MODELS.find(m => m.id === modelId);
 }
 
-export function hasProviderKey(providerId: string): boolean {
-  const p = getProvider(providerId);
-  return p ? !!process.env[p.envKey] : false;
-}
-
-export function getModelsForCapability(cap: Capability): Model[] {
-  return MODELS.filter(m => m.capabilities.includes(cap) && hasProviderKey(m.provider));
-}
-
-export function getActiveProviders(): Provider[] {
-  return PROVIDERS.filter(p => !!process.env[p.envKey]);
-}
-
-export function getAllProviderSlots(): { id: string; name: string; envKey: string; active: boolean }[] {
-  return PROVIDERS.map(p => ({ id: p.id, name: p.name, envKey: p.envKey, active: !!process.env[p.envKey] }));
-}
+// Note: hasProviderKey, getModelsForCapability, getActiveProviders, getAllProviderSlots
+// live in ./keys.ts to avoid circular imports (they need DB access via keys.ts).

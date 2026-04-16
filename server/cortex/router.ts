@@ -2,7 +2,8 @@
  * Cortex Router — capability + tier → best available model, with fallback.
  */
 
-import { type Capability, type Model, MODELS, hasProviderKey } from "./providers.js";
+import { type Capability, type Model, MODELS } from "./providers.js";
+import { hasProviderKey } from "./keys.js";
 
 export type ModelTier = "frontier" | "strong" | "balanced" | "fast" | "cheap";
 

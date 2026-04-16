@@ -69,4 +69,9 @@ export const api = {
 
   // Cortex
   getCortexStatus: () => req<any>("GET", "/api/user/models"),
+
+  // Admin
+  setProviderKey: (id: string, key: string) => req("PUT", `/api/admin/providers/${id}/key`, { key }),
+  deleteProviderKey: (id: string) => req("DELETE", `/api/admin/providers/${id}/key`),
+  testProvider: (id: string) => req<any>("POST", `/api/admin/providers/${id}/test`, {}),
 };
