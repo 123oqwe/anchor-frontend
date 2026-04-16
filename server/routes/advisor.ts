@@ -2,7 +2,7 @@ import { Router, Request, Response } from "express";
 import Anthropic from "@anthropic-ai/sdk";
 import { db, DEFAULT_USER_ID } from "../db.js";
 import { nanoid } from "nanoid";
-import { bus } from "../events.js";
+import { bus, type EditableStep, type StepChange } from "../events.js";
 
 const router = Router();
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -38,12 +38,6 @@ function getStateContext(): string {
   return `Current state — Energy: ${s.energy}/100, Focus: ${s.focus}/100, Stress: ${s.stress}/100`;
 }
 
-function saveMessages(mode: string, userContent: string, assistantContent: string, extra: Record<string, any> = {}) {
-  const insertMsg = db.prepare("INSERT INTO messages (id, user_id, mode, role, content, draft_type, draft_status, agent_name) VALUES (?,?,?,?,?,?,?,?)");
-  insertMsg.run(nanoid(), DEFAULT_USER_ID, mode, "user", userContent, null, null, null);
-  insertMsg.run(nanoid(), DEFAULT_USER_ID, mode, extra.role ?? "advisor", assistantContent, extra.draftType ?? null, extra.draftStatus ?? null, extra.agentName ?? null);
-}
-
 function logExecution(agent: string, action: string, status = "success") {
   db.prepare("INSERT INTO agent_executions (id, user_id, agent, action, status) VALUES (?,?,?,?,?)")
     .run(nanoid(), DEFAULT_USER_ID, agent, action, status);
@@ -65,38 +59,50 @@ router.get("/history/:mode", (req, res) => {
   })));
 });
 
-// ── Personal Advisor ─────────────────────────────────────────────────────────
+// ── Decision Agent (Personal Advisor) ───────────────────────────────────────
 
 router.post("/personal", async (req: Request, res: Response) => {
   const { message } = req.body;
   if (!message) return res.status(400).json({ error: "message required" });
 
-  const graphCtx = getGraphContext();
-  const memCtx = getMemoryContext();
-  const twinCtx = getTwinContext();
-  const stateCtx = getStateContext();
+  const systemPrompt = `You are Anchor's Decision Agent. You know the user through their Human Graph and behavioral patterns.
 
-  const systemPrompt = `You are Anchor's Personal Advisor — an intimate AI that knows the user deeply through their Human Graph and behavioral patterns.
-
-Your role: Give sharp, personal, actionable advice based entirely on the user's actual situation. Reference specific items from their graph. Call out avoidance patterns directly. Be direct, warm, and insightful. Keep responses concise (2-4 sentences or a short structured plan).
-
-${stateCtx}
+${getStateContext()}
 
 HUMAN GRAPH:
-${graphCtx}
+${getGraphContext()}
 
 BEHAVIORAL MEMORY:
-${memCtx}
+${getMemoryContext()}
 
-TWIN INSIGHTS:
-${twinCtx}
+TWIN INSIGHTS (user behavioral priors):
+${getTwinContext()}
 
-When creating plans or drafts, format them as markdown with clear steps. Mark time estimates when relevant.`;
+RULES:
+1. For actionable requests, respond with a JSON object containing editable steps the user can modify.
+2. For conversational questions, respond with plain text advice (2-3 sentences, direct, personal).
+3. When producing steps, reference specific items from the graph. Factor in twin insights.
+4. Always output valid JSON when you detect the user wants a plan, action, or task list.
+
+JSON FORMAT (when actionable):
+{
+  "type": "plan",
+  "suggestion_summary": "One sentence explaining your recommendation",
+  "reasoning": "Why this approach, referencing graph/twin data",
+  "editable_steps": [
+    { "id": 1, "content": "Specific action", "time_estimate": "20min" },
+    { "id": 2, "content": "Another action", "time_estimate": "1h" }
+  ],
+  "risk_level": "low" | "high",
+  "referenced_nodes": ["node labels referenced"]
+}
+
+PLAIN TEXT FORMAT (when conversational):
+Just respond naturally in 2-3 sentences. Be direct and personal.`;
 
   try {
-    // Build conversation history for context
     const historyRows = db.prepare("SELECT role, content FROM messages WHERE user_id=? AND mode='personal' ORDER BY created_at DESC LIMIT 10").all(DEFAULT_USER_ID) as any[];
-    const historyMsgs = historyRows.reverse().map(r => ({ role: (r.role === "advisor" ? "assistant" : "user") as "user" | "assistant", content: r.content as string }));
+    const historyMsgs = historyRows.reverse().map(r => ({ role: (r.role === "user" ? "user" : "assistant") as "user" | "assistant", content: r.content as string }));
 
     const response = await anthropic.messages.create({
       model: "claude-sonnet-4-6",
@@ -105,30 +111,78 @@ When creating plans or drafts, format them as markdown with clear steps. Mark ti
       messages: [...historyMsgs, { role: "user" as const, content: message }],
     });
 
-    const content = (response.content[0] as any).text as string;
-    const isDraft = content.includes("**") && (content.includes("1.") || content.includes("→") || content.includes("Step"));
-    const draftType = isDraft ? (content.toLowerCase().includes("email") ? "email" : "plan") : undefined;
+    const raw = (response.content[0] as any).text as string;
 
-    saveMessages("personal", message, content, {
-      role: isDraft ? "draft" : "advisor",
-      draftType,
-      draftStatus: isDraft ? "pending" : null,
-    });
+    // Try to parse as structured plan
+    let parsed: any = null;
+    try {
+      const jsonMatch = raw.match(/\{[\s\S]*\}/);
+      if (jsonMatch) parsed = JSON.parse(jsonMatch[0]);
+    } catch {}
 
-    logExecution("Decision Agent", `Responded to: ${message.substring(0, 60)}`);
+    const isPlan = parsed?.type === "plan" && Array.isArray(parsed?.editable_steps);
+    const msgId = nanoid();
+
+    // Save to messages
+    const insertMsg = db.prepare("INSERT INTO messages (id, user_id, mode, role, content, draft_type, draft_status, agent_name) VALUES (?,?,?,?,?,?,?,?)");
+    insertMsg.run(nanoid(), DEFAULT_USER_ID, "personal", "user", message, null, null, null);
+    insertMsg.run(msgId, DEFAULT_USER_ID, "personal", isPlan ? "draft" : "advisor", raw, isPlan ? "plan" : null, isPlan ? "pending" : null, null);
+
+    logExecution("Decision Agent", `${isPlan ? "Plan" : "Advice"}: ${message.substring(0, 60)}`);
 
     res.json({
-      id: nanoid(),
-      role: isDraft ? "draft" : "advisor",
-      content,
+      id: msgId,
+      role: isPlan ? "draft" : "advisor",
+      content: raw,
       timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-      draftType,
-      draftStatus: isDraft ? "pending" : undefined,
+      draftType: isPlan ? "plan" : undefined,
+      draftStatus: isPlan ? "pending" : undefined,
+      structured: isPlan ? parsed : undefined,
     });
   } catch (err: any) {
-    console.error("Personal advisor error:", err);
+    console.error("Decision Agent error:", err);
     res.status(500).json({ error: err.message });
   }
+});
+
+// ── Confirm Plan (user edited steps → Execution + Twin) ─────────────────────
+
+router.post("/confirm", async (req: Request, res: Response) => {
+  const { original_steps, user_steps } = req.body;
+  if (!Array.isArray(original_steps) || !Array.isArray(user_steps)) {
+    return res.status(400).json({ error: "original_steps and user_steps required" });
+  }
+
+  // Compute diff
+  const changes: StepChange[] = [];
+  const originalMap = new Map(original_steps.map((s: EditableStep) => [s.id, s]));
+  const userIds = new Set(user_steps.map((s: EditableStep) => s.id));
+
+  for (const us of user_steps) {
+    const orig = originalMap.get(us.id);
+    if (!orig) {
+      changes.push({ type: "added", content: us.content });
+    } else if (orig.content !== us.content) {
+      changes.push({ type: "modified", step_id: us.id, before: orig.content, after: us.content });
+    } else {
+      changes.push({ type: "kept", step_id: us.id });
+    }
+  }
+  for (const os of original_steps) {
+    if (!userIds.has(os.id)) {
+      changes.push({ type: "deleted", step_id: os.id, before: os.content });
+    }
+  }
+
+  logExecution("Decision Agent", `Plan confirmed: ${user_steps.length} steps, ${changes.filter(c => c.type !== "kept").length} changes`);
+
+  // Fire USER_CONFIRMED → triggers Execution Agent (ReAct) + Twin Agent (sidecar)
+  bus.publish({
+    type: "USER_CONFIRMED",
+    payload: { original_steps, user_steps, changes },
+  });
+
+  res.json({ ok: true, changes });
 });
 
 // ── General AI ───────────────────────────────────────────────────────────────
@@ -137,21 +191,21 @@ router.post("/general", async (req: Request, res: Response) => {
   const { message } = req.body;
   if (!message) return res.status(400).json({ error: "message required" });
 
-  const systemPrompt = `You are a general-purpose AI assistant — like Claude, but embedded in Anchor OS. You have no access to the user's personal data in this mode. Help with research, analysis, writing, brainstorming, coding, and any other task. Be concise and helpful.`;
-
   try {
     const historyRows = db.prepare("SELECT role, content FROM messages WHERE user_id=? AND mode='general' ORDER BY created_at DESC LIMIT 10").all(DEFAULT_USER_ID) as any[];
-    const historyMsgs = historyRows.reverse().map(r => ({ role: (r.role === "advisor" ? "assistant" : "user") as "user" | "assistant", content: r.content as string }));
+    const historyMsgs = historyRows.reverse().map(r => ({ role: (r.role === "user" ? "user" : "assistant") as "user" | "assistant", content: r.content as string }));
 
     const response = await anthropic.messages.create({
       model: "claude-sonnet-4-6",
       max_tokens: 2048,
-      system: systemPrompt,
+      system: "You are a general-purpose AI assistant embedded in Anchor OS. No access to personal data in this mode. Be concise and helpful.",
       messages: [...historyMsgs, { role: "user" as const, content: message }],
     });
 
     const content = (response.content[0] as any).text as string;
-    saveMessages("general", message, content);
+    const insertMsg = db.prepare("INSERT INTO messages (id, user_id, mode, role, content, draft_type, draft_status, agent_name) VALUES (?,?,?,?,?,?,?,?)");
+    insertMsg.run(nanoid(), DEFAULT_USER_ID, "general", "user", message, null, null, null);
+    insertMsg.run(nanoid(), DEFAULT_USER_ID, "general", "advisor", content, null, null, null);
 
     res.json({
       id: nanoid(),
@@ -165,105 +219,17 @@ router.post("/general", async (req: Request, res: Response) => {
   }
 });
 
-// ── Agent Mode ───────────────────────────────────────────────────────────────
-
-router.post("/agent", async (req: Request, res: Response) => {
-  const { message } = req.body;
-  if (!message) return res.status(400).json({ error: "message required" });
-
-  const graphCtx = getGraphContext();
-
-  const systemPrompt = `You are Anchor's Agent Orchestrator. When the user describes a task, you create a specialized agent plan.
-
-HUMAN GRAPH CONTEXT:
-${graphCtx}
-
-When given a task, respond with a structured agent creation plan in this exact format:
-**Agent Created: [Descriptive Agent Name]**
-
-Objective: [one clear sentence]
-
-Plan:
-→ Step 1: [specific action]
-→ Step 2: [specific action]
-→ Step 3: [specific action]
-→ Step 4: Present results for your approval
-
-Estimated: [time estimate]
-
-Make the plan specific, referencing the user's actual Human Graph data when relevant. Be concise.`;
-
-  try {
-    const response = await anthropic.messages.create({
-      model: "claude-sonnet-4-6",
-      max_tokens: 512,
-      system: systemPrompt,
-      messages: [{ role: "user", content: message }],
-    });
-
-    const content = (response.content[0] as any).text as string;
-    const agentNameMatch = content.match(/\*\*Agent Created: (.+?)\*\*/);
-    const agentName = agentNameMatch ? agentNameMatch[1] : "Custom Task Agent";
-
-    saveMessages("agent", message, content, {
-      role: "agent-action",
-      draftType: "agent",
-      draftStatus: "pending",
-      agentName,
-    });
-
-    logExecution("Execution Agent", `Created agent: ${agentName}`);
-
-    res.json({
-      id: nanoid(),
-      role: "agent-action",
-      content,
-      timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-      draftType: "agent",
-      draftStatus: "pending",
-      agentName,
-    });
-  } catch (err: any) {
-    console.error("Agent mode error:", err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ── Draft approval ───────────────────────────────────────────────────────────
-
-router.post("/drafts/:id/approve", (req, res) => {
-  db.prepare("UPDATE messages SET draft_status='approved' WHERE id=? AND user_id=?").run(req.params.id, DEFAULT_USER_ID);
-  logExecution("Execution Agent", `Draft approved: ${req.params.id}`);
-
-  // Fire event → triggers Execution Agent → Twin Agent → Memory Agent
-  const msg = db.prepare("SELECT content FROM messages WHERE id=?").get(req.params.id) as any;
-  if (msg) {
-    bus.publish({ type: "DRAFT_APPROVED", payload: { messageId: req.params.id, content: msg.content } });
-  }
-
-  res.json({ ok: true });
-});
-
-router.post("/drafts/:id/reject", (req, res) => {
-  db.prepare("UPDATE messages SET draft_status='rejected' WHERE id=? AND user_id=?").run(req.params.id, DEFAULT_USER_ID);
-  res.json({ ok: true });
-});
-
 // ── Onboarding ───────────────────────────────────────────────────────────────
 
-router.post("/onboarding/scan", async (req: Request, res: Response) => {
-  // Simulate a brief scan then return graph summary
+router.post("/onboarding/scan", async (_req: Request, res: Response) => {
   const nodes = db.prepare("SELECT domain, COUNT(*) as count FROM graph_nodes WHERE user_id=? GROUP BY domain").all(DEFAULT_USER_ID) as any[];
   const insights = db.prepare("SELECT insight FROM twin_insights WHERE user_id=? LIMIT 4").all(DEFAULT_USER_ID) as any[];
   const totalNodes = db.prepare("SELECT COUNT(*) as c FROM graph_nodes WHERE user_id=?").get(DEFAULT_USER_ID) as any;
 
   res.json({
-    domains: nodes.map(n => ({
-      name: n.domain.charAt(0).toUpperCase() + n.domain.slice(1),
-      nodes: n.count,
-    })),
+    domains: nodes.map((n: any) => ({ name: n.domain.charAt(0).toUpperCase() + n.domain.slice(1), nodes: n.count })),
     totalNodes: totalNodes?.c ?? 0,
-    insights: insights.map(i => i.insight.substring(0, 60) + "..."),
+    insights: insights.map((i: any) => i.insight.substring(0, 60) + "..."),
   });
 });
 

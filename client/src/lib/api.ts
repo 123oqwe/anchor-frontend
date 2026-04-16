@@ -63,7 +63,7 @@ export const api = {
   sendPersonal: (message: string) => req<any>("POST", "/api/advisor/personal", { message }),
   sendGeneral: (message: string) => req<any>("POST", "/api/advisor/general", { message }),
   sendAgent: (message: string) => req<any>("POST", "/api/advisor/agent", { message }),
-  approveDraft: (id: string) => req("POST", `/api/advisor/drafts/${id}/approve`, {}),
+  confirmPlan: (original_steps: any[], user_steps: any[]) => req<any>("POST", "/api/advisor/confirm", { original_steps, user_steps }),
   rejectDraft: (id: string) => req("POST", `/api/advisor/drafts/${id}/reject`, {}),
   scanOnboarding: () => req<any>("POST", "/api/advisor/onboarding/scan", {}),
 };

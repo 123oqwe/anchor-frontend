@@ -1,13 +1,25 @@
 import { EventEmitter } from "events";
 
+export interface EditableStep {
+  id: number;
+  content: string;
+  time_estimate?: string;
+}
+
+export interface StepChange {
+  type: "kept" | "modified" | "deleted" | "added";
+  step_id?: number;
+  before?: string;
+  after?: string;
+  content?: string;
+}
+
 export type AnchorEvent =
-  | { type: "DECISION_MADE";  payload: { messageId: string; content: string; isDraft: boolean } }
-  | { type: "DRAFT_APPROVED"; payload: { messageId: string; content: string } }
-  | { type: "DRAFT_REJECTED"; payload: { messageId: string } }
-  | { type: "TASK_COMPLETED"; payload: { taskId: string; title: string } }
-  | { type: "GRAPH_UPDATED";  payload: { nodeId: string; status: string; label: string } }
-  | { type: "TWIN_UPDATED";   payload: { insight: string } }
-  | { type: "EXECUTION_DONE"; payload: { planSummary: string; changes: number } };
+  | { type: "USER_CONFIRMED"; payload: { original_steps: EditableStep[]; user_steps: EditableStep[]; changes: StepChange[] } }
+  | { type: "EXECUTION_DONE"; payload: { steps_result: { step: string; status: string; result: string }[]; plan_summary: string } }
+  | { type: "TWIN_UPDATED";  payload: { insight: string } }
+  | { type: "GRAPH_UPDATED"; payload: { nodeId: string; status: string; label: string } }
+  | { type: "TASK_COMPLETED"; payload: { taskId: string; title: string } };
 
 class AnchorBus extends EventEmitter {
   publish(data: AnchorEvent) {
