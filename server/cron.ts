@@ -1,7 +1,7 @@
 import { schedule } from "node-cron";
 import { db, DEFAULT_USER_ID } from "./db.js";
 import { nanoid } from "nanoid";
-import { generate } from "./llm.js";
+import { text } from "./cortex/index.js";
 
 function log(agent: string, action: string, status = "success") {
   db.prepare("INSERT INTO agent_executions (id, user_id, agent, action, status) VALUES (?,?,?,?,?)")
@@ -18,7 +18,7 @@ schedule("0 8 * * *", async () => {
     const state = db.prepare("SELECT energy, focus, stress FROM user_state WHERE user_id=?").get(DEFAULT_USER_ID) as any;
     if (!nodes.length) return;
 
-    const content = await generate({
+    const content = await text({
       task: "morning_digest",
       system: "You are Anchor's Morning Digest Agent. Write a 3-bullet daily briefing. Be direct and specific. No fluff.",
       messages: [{
@@ -60,7 +60,7 @@ schedule("0 9 * * 1", async () => {
     ).all(DEFAULT_USER_ID) as any[];
     const doneTasks = db.prepare("SELECT COUNT(*) as c FROM tasks WHERE status='done' AND created_at >= datetime('now','-7 days')").get() as any;
 
-    const text = await generate({
+    const reflectionText = await text({
       task: "weekly_reflection",
       system: `You are Anchor's Twin Agent doing weekly reflection. Extract ONE behavioral pattern.\nRespond ONLY with valid JSON: {"category":"string","insight":"string","confidence":0.0-1.0}`,
       messages: [{
@@ -70,7 +70,7 @@ schedule("0 9 * * 1", async () => {
       maxTokens: 200,
     });
 
-    const jsonMatch = text.match(/\{[^}]+\}/);
+    const jsonMatch = reflectionText.match(/\{[^}]+\}/);
     if (!jsonMatch) return;
     const parsed = JSON.parse(jsonMatch[0]);
     if (parsed?.insight) {

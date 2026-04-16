@@ -2,7 +2,7 @@ import { Router, Request, Response } from "express";
 import { db, DEFAULT_USER_ID } from "../db.js";
 import { nanoid } from "nanoid";
 import { bus, type EditableStep, type StepChange } from "../events.js";
-import { generate } from "../llm.js";
+import { text } from "../cortex/index.js";
 
 const router = Router();
 
@@ -99,7 +99,7 @@ Just respond naturally in 2-3 sentences. Be direct and personal.`;
     const historyRows = db.prepare("SELECT role, content FROM messages WHERE user_id=? AND mode='personal' ORDER BY created_at DESC LIMIT 10").all(DEFAULT_USER_ID) as any[];
     const historyMsgs = historyRows.reverse().map(r => ({ role: (r.role === "user" ? "user" : "assistant") as "user" | "assistant", content: r.content as string }));
 
-    const raw = await generate({
+    const raw = await text({
       task: "decision",
       system: systemPrompt,
       messages: [...historyMsgs, { role: "user" as const, content: message }],
@@ -169,7 +169,7 @@ router.post("/general", async (req: Request, res: Response) => {
     const historyRows = db.prepare("SELECT role, content FROM messages WHERE user_id=? AND mode='general' ORDER BY created_at DESC LIMIT 10").all(DEFAULT_USER_ID) as any[];
     const historyMsgs = historyRows.reverse().map(r => ({ role: (r.role === "user" ? "user" : "assistant") as "user" | "assistant", content: r.content as string }));
 
-    const content = await generate({
+    const content = await text({
       task: "general_chat",
       system: "You are a general-purpose AI assistant embedded in Anchor OS. No access to personal data in this mode. Be concise and helpful.",
       messages: [...historyMsgs, { role: "user" as const, content: message }],

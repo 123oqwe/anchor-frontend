@@ -6,7 +6,8 @@ import Anthropic from "@anthropic-ai/sdk";
 import { bus, type AnchorEvent, type EditableStep, type StepChange } from "./events.js";
 import { db, DEFAULT_USER_ID } from "./db.js";
 import { nanoid } from "nanoid";
-import { generate, generateWithTools } from "./llm.js";
+import { text } from "./cortex/index.js";
+import { routeTask } from "./cortex/router.js";
 
 function log(agent: string, action: string, status = "success") {
   db.prepare("INSERT INTO agent_executions (id, user_id, agent, action, status) VALUES (?,?,?,?,?)")
@@ -30,9 +31,9 @@ async function runExecutionReAct(steps: EditableStep[]) {
   console.log(`[Execution Agent] ReAct starting with ${steps.length} steps...`);
   log("Execution Agent", `ReAct: ${steps.length} steps`);
 
-  const { selectModelId } = await import("./router.js");
-  const modelId = selectModelId("react_execution");
-  console.log(`[Router] react_execution → ${modelId}`);
+  const { model: routedModel } = routeTask("react_execution");
+  const modelId = routedModel.id;
+  console.log(`[Cortex] react_execution → ${routedModel.name} (${routedModel.provider})`);
 
   const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -119,7 +120,7 @@ async function twinLearnFromEdits(changes: StepChange[]) {
   console.log("[Twin Sidecar] Learning from user edits...");
 
   try {
-    const text = await generate({
+    const result = await text({
       task: "twin_edit_learning",
       system: `You are Anchor's Twin Agent. Observe how the user modifies AI suggestions to learn preferences.\nGiven changes, extract ONE insight. Respond ONLY with JSON: {"category":"string","insight":"string","confidence":0.0-1.0}`,
       messages: [{
@@ -134,7 +135,7 @@ async function twinLearnFromEdits(changes: StepChange[]) {
       maxTokens: 200,
     });
 
-    const jsonMatch = text.match(/\{[^}]+\}/);
+    const jsonMatch = result.match(/\{[^}]+\}/);
     if (!jsonMatch) return;
     const parsed = JSON.parse(jsonMatch[0]);
     if (parsed?.insight) {
@@ -153,7 +154,7 @@ async function twinLearnFromEdits(changes: StepChange[]) {
 async function twinLearnFromResults(payload: { steps_result: any[]; plan_summary: string }) {
   console.log("[Twin Agent] Learning from execution results...");
   try {
-    const text = await generate({
+    const result = await text({
       task: "twin_result_learning",
       system: `You are Anchor's Twin Agent. Analyze execution results, extract ONE insight.\nRespond ONLY with JSON: {"category":"string","insight":"string","confidence":0.0-1.0}`,
       messages: [{
@@ -163,7 +164,7 @@ async function twinLearnFromResults(payload: { steps_result: any[]; plan_summary
       maxTokens: 200,
     });
 
-    const jsonMatch = text.match(/\{[^}]+\}/);
+    const jsonMatch = result.match(/\{[^}]+\}/);
     if (!jsonMatch) return;
     const parsed = JSON.parse(jsonMatch[0]);
     if (parsed?.insight) {
