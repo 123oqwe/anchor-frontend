@@ -16,7 +16,7 @@ import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { getCandidates, routeTask, TASK_ROUTES } from "./router.js";
-import { PROVIDERS, type Model, type Capability } from "./providers.js";
+import { PROVIDERS, MODELS, type Model, type Capability } from "./providers.js";
 import { getApiKey, getAllKeyStatuses, getModelsForCapability, getActiveProviders, getAllProviderSlots } from "./keys.js";
 
 // ── Provider factory ────────────────────────────────────────────────────────
@@ -176,6 +176,45 @@ export async function embed(opts: {
 }
 
 // ── Status / Introspection ──────────────────────────────────────────────────
+
+/** Get ALL models for a capability, active + inactive, with their provider status */
+export function getCapabilityRoster(capability: Capability) {
+  const keyStatuses = getAllKeyStatuses();
+  const models = MODELS
+    .filter(m => m.capabilities.includes(capability))
+    .map(m => {
+      const provider = PROVIDERS.find(p => p.id === m.provider)!;
+      const status = keyStatuses[m.provider];
+      return {
+        modelId: m.id,
+        modelName: m.name,
+        tier: m.tier,
+        providerId: m.provider,
+        providerName: provider.name,
+        envKey: provider.envKey,
+        active: status.source !== "none",
+        keySource: status.source,
+      };
+    });
+
+  // Unique providers for this capability
+  const providerIds = Array.from(new Set(models.map(m => m.providerId)));
+  const providers = providerIds.map(pid => {
+    const p = PROVIDERS.find(x => x.id === pid)!;
+    const status = keyStatuses[pid];
+    return {
+      id: pid,
+      name: p.name,
+      envKey: p.envKey,
+      active: status.source !== "none",
+      keySource: status.source,
+      keyMasked: status.masked,
+      modelCount: models.filter(m => m.providerId === pid).length,
+    };
+  });
+
+  return { capability, models, providers };
+}
 
 export function getStatus() {
   const keyStatuses = getAllKeyStatuses();

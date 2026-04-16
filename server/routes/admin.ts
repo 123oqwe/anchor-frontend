@@ -1,12 +1,23 @@
 import { Router } from "express";
 import { setApiKey, deleteApiKey, getApiKey } from "../cortex/keys.js";
 import { PROVIDERS } from "../cortex/providers.js";
+import { getCapabilityRoster } from "../cortex/index.js";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { generateText } from "ai";
 
 const router = Router();
+
+// ── Get full roster for a capability (active + inactive models/providers) ───
+router.get("/capability/:cap", (req, res) => {
+  try {
+    const roster = getCapabilityRoster(req.params.cap as any);
+    res.json(roster);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
 
 // ── Save an API key ─────────────────────────────────────────────────────────
 router.put("/providers/:id/key", (req, res) => {

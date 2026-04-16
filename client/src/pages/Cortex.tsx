@@ -1,9 +1,9 @@
-import { useState, useEffect } from "react";
-import { motion } from "framer-motion";
+import { useState, useEffect, useRef } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 import {
   Cpu, CheckCircle2, XCircle, ChevronDown, ChevronRight,
   Loader2, Zap, Eye, Image, Video, Mic, Volume2,
-  Music, Box, Bot, Search, Trash2, Play, AlertCircle, type LucideIcon,
+  Music, Box, Bot, Search, Trash2, Play, AlertCircle, X, type LucideIcon,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { api } from "@/lib/api";
@@ -25,29 +25,18 @@ const CAPABILITY_META: Record<string, { icon: LucideIcon; label: string; color: 
 };
 
 const TASK_LABELS: Record<string, string> = {
-  decision: "Decision Agent",
-  general_chat: "General Chat",
-  react_execution: "Execution (ReAct)",
-  twin_edit_learning: "Twin — Edit Learning",
-  twin_result_learning: "Twin — Result Learning",
-  morning_digest: "Morning Digest",
-  weekly_reflection: "Weekly Reflection",
-  deep_reasoning: "Deep Reasoning",
-  image_generation: "Image Generation",
-  video_generation: "Video Generation",
-  speech_to_text: "Speech-to-Text",
-  text_to_speech: "Text-to-Speech",
-  music_generation: "Music Generation",
-  sound_effects: "Sound Effects",
-  voice_cloning: "Voice Cloning",
-  avatar_generation: "Avatar Generation",
-  three_d_generation: "3D Generation",
-  embed: "Embeddings",
-  vision_analysis: "Vision Analysis",
+  decision: "Decision Agent", general_chat: "General Chat", react_execution: "Execution (ReAct)",
+  twin_edit_learning: "Twin — Edit Learning", twin_result_learning: "Twin — Result Learning",
+  morning_digest: "Morning Digest", weekly_reflection: "Weekly Reflection", deep_reasoning: "Deep Reasoning",
+  image_generation: "Image Generation", video_generation: "Video Generation", speech_to_text: "Speech-to-Text",
+  text_to_speech: "Text-to-Speech", music_generation: "Music Generation", sound_effects: "Sound Effects",
+  voice_cloning: "Voice Cloning", avatar_generation: "Avatar Generation", three_d_generation: "3D Generation",
+  embed: "Embeddings", vision_analysis: "Vision Analysis",
 };
 
-function ProviderRow({ provider, onChange }: { provider: any; onChange: () => void }) {
-  const [expanded, setExpanded] = useState(false);
+// ── Inline provider key editor ──────────────────────────────────────────────
+
+function InlineKeyEditor({ provider, onChange }: { provider: any; onChange: () => void }) {
   const [keyInput, setKeyInput] = useState("");
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -63,9 +52,7 @@ function ProviderRow({ provider, onChange }: { provider: any; onChange: () => vo
       onChange();
     } catch (err: any) {
       setTestResult({ ok: false, error: err.message });
-    } finally {
-      setSaving(false);
-    }
+    } finally { setSaving(false); }
   };
 
   const remove = async () => {
@@ -76,17 +63,176 @@ function ProviderRow({ provider, onChange }: { provider: any; onChange: () => vo
   };
 
   const test = async () => {
-    setTesting(true);
-    setTestResult(null);
+    setTesting(true); setTestResult(null);
     try {
-      const result = await api.testProvider(provider.id);
-      setTestResult(result);
+      const r = await api.testProvider(provider.id);
+      setTestResult(r);
     } catch (err: any) {
       setTestResult({ ok: false, error: err.message });
-    } finally {
-      setTesting(false);
-    }
+    } finally { setTesting(false); }
   };
+
+  return (
+    <div className="space-y-2 py-2">
+      <div className="flex gap-2">
+        <input
+          type="password"
+          value={keyInput}
+          onChange={e => setKeyInput(e.target.value)}
+          onKeyDown={e => e.key === "Enter" && save()}
+          placeholder={provider.active ? "Replace key…" : `Paste ${provider.envKey.toLowerCase().replace(/_/g, "-")}`}
+          className="flex-1 bg-white/5 rounded-md px-2.5 py-1.5 text-xs text-foreground placeholder:text-muted-foreground/40 border border-border/50 focus:outline-none focus:border-amber-400/50 font-mono"
+        />
+        <button onClick={save} disabled={!keyInput.trim() || saving}
+          className="bg-amber-500/20 text-amber-400 rounded-md px-3 py-1.5 text-[11px] font-medium hover:bg-amber-500/30 disabled:opacity-40 transition-colors">
+          {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : "Save"}
+        </button>
+      </div>
+
+      {provider.active && (
+        <div className="flex gap-1.5">
+          <button onClick={test} disabled={testing}
+            className="flex items-center gap-1 glass rounded-md px-2 py-1 text-[10px] text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50">
+            {testing ? <Loader2 className="h-2.5 w-2.5 animate-spin" /> : <Play className="h-2.5 w-2.5" />}
+            Test
+          </button>
+          {provider.keySource === "db" && (
+            <button onClick={remove}
+              className="flex items-center gap-1 glass rounded-md px-2 py-1 text-[10px] text-muted-foreground hover:text-red-400 transition-colors">
+              <Trash2 className="h-2.5 w-2.5" /> Delete
+            </button>
+          )}
+        </div>
+      )}
+
+      {testResult && (
+        <div className={`rounded-md px-2 py-1.5 text-[10px] ${testResult.ok ? "bg-emerald-500/10 text-emerald-400" : "bg-red-500/10 text-red-400"}`}>
+          {testResult.ok ? (
+            <span>✓ {testResult.model} · {testResult.latencyMs}ms</span>
+          ) : (
+            <span className="flex items-start gap-1"><AlertCircle className="h-2.5 w-2.5 mt-0.5 shrink-0" />{testResult.error?.slice(0, 100)}</span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Capability Detail Panel (opens on capability card click) ─────────────────
+
+function CapabilityPanel({ capability, onClose, onChange }: { capability: string; onClose: () => void; onChange: () => void }) {
+  const [roster, setRoster] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  const [expandedProvider, setExpandedProvider] = useState<string | null>(null);
+
+  const load = async () => {
+    const r = await api.getCapabilityRoster(capability);
+    setRoster(r);
+    setLoading(false);
+  };
+
+  useEffect(() => { load(); }, [capability]);
+
+  const meta = CAPABILITY_META[capability];
+  const Icon = meta?.icon ?? Cpu;
+
+  return (
+    <motion.div initial={{ opacity: 0, x: 400 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 400 }}
+      transition={{ duration: 0.2, ease: [0.25, 0.1, 0.25, 1] }}
+      className="fixed top-0 right-0 bottom-0 w-[480px] glass-strong border-l border-border/50 z-50 flex flex-col">
+      {/* Header */}
+      <div className="shrink-0 flex items-center gap-3 p-5 border-b border-border/30">
+        <div className={`w-9 h-9 rounded-lg bg-white/5 flex items-center justify-center`}>
+          <Icon className={`h-4 w-4 ${meta?.color ?? "text-muted-foreground"}`} />
+        </div>
+        <div className="flex-1">
+          <h3 className="text-sm font-semibold text-foreground">{meta?.label ?? capability}</h3>
+          <p className="text-[10px] text-muted-foreground">All providers & models</p>
+        </div>
+        <button onClick={onClose} className="p-1.5 hover:bg-white/10 rounded-md transition-colors">
+          <X className="h-4 w-4 text-muted-foreground" />
+        </button>
+      </div>
+
+      {/* Content */}
+      <div className="flex-1 overflow-y-auto custom-scrollbar p-5 space-y-4">
+        {loading ? (
+          <div className="flex items-center justify-center py-8"><Loader2 className="h-5 w-5 animate-spin text-amber-400" /></div>
+        ) : roster ? (
+          <>
+            {/* Summary */}
+            <div className="glass rounded-lg p-3">
+              <div className="flex items-center gap-4 text-xs">
+                <div>
+                  <div className="text-lg font-bold text-foreground">{roster.providers.length}</div>
+                  <div className="text-[10px] text-muted-foreground">providers</div>
+                </div>
+                <div>
+                  <div className="text-lg font-bold text-foreground">{roster.models.length}</div>
+                  <div className="text-[10px] text-muted-foreground">models</div>
+                </div>
+                <div>
+                  <div className="text-lg font-bold text-emerald-400">{roster.providers.filter((p: any) => p.active).length}</div>
+                  <div className="text-[10px] text-muted-foreground">active</div>
+                </div>
+              </div>
+            </div>
+
+            {/* Providers list */}
+            <div>
+              <h4 className="text-[10px] text-muted-foreground uppercase tracking-wider mb-2">Providers</h4>
+              <div className="space-y-1.5">
+                {roster.providers
+                  .sort((a: any, b: any) => Number(b.active) - Number(a.active))
+                  .map((p: any) => {
+                    const providerModels = roster.models.filter((m: any) => m.providerId === p.id);
+                    const isExp = expandedProvider === p.id;
+                    return (
+                      <div key={p.id} className={`glass rounded-lg overflow-hidden ${p.active ? "border-emerald-400/20" : ""}`}>
+                        <button onClick={() => setExpandedProvider(isExp ? null : p.id)}
+                          className="w-full flex items-center gap-2 px-3 py-2 hover:bg-white/[0.03] transition-colors">
+                          {p.active ? <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400 shrink-0" /> : <XCircle className="h-3.5 w-3.5 text-muted-foreground/30 shrink-0" />}
+                          <span className={`text-xs font-medium flex-1 text-left ${p.active ? "text-foreground" : "text-muted-foreground"}`}>{p.name}</span>
+                          <span className="text-[9px] text-muted-foreground">{providerModels.length} model{providerModels.length > 1 ? "s" : ""}</span>
+                          {p.keyMasked && <code className="text-[9px] font-mono text-emerald-400/70">{p.keyMasked}</code>}
+                          {isExp ? <ChevronDown className="h-3 w-3 text-muted-foreground" /> : <ChevronRight className="h-3 w-3 text-muted-foreground" />}
+                        </button>
+
+                        {isExp && (
+                          <div className="px-3 pb-3 border-t border-border/20 pt-2 space-y-2">
+                            {/* Models */}
+                            <div className="space-y-0.5">
+                              <span className="text-[9px] text-muted-foreground uppercase tracking-wider">Models</span>
+                              {providerModels.map((m: any) => (
+                                <div key={m.modelId} className="flex items-center gap-2 py-0.5">
+                                  <div className={`w-1 h-1 rounded-full ${m.active ? "bg-emerald-400" : "bg-muted-foreground/20"}`} />
+                                  <span className="text-[11px] text-foreground flex-1">{m.modelName}</span>
+                                  <Badge className="text-[8px] bg-white/5 text-muted-foreground">{m.tier}</Badge>
+                                </div>
+                              ))}
+                            </div>
+                            {/* Key editor */}
+                            <InlineKeyEditor provider={p} onChange={() => { load(); onChange(); }} />
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+              </div>
+            </div>
+          </>
+        ) : (
+          <p className="text-center text-muted-foreground text-sm">Failed to load</p>
+        )}
+      </div>
+    </motion.div>
+  );
+}
+
+// ── Standalone provider row (for main list) ─────────────────────────────────
+
+function ProviderRow({ provider, onChange }: { provider: any; onChange: () => void }) {
+  const [expanded, setExpanded] = useState(false);
 
   return (
     <div className="glass rounded-xl overflow-hidden">
@@ -108,76 +254,10 @@ function ProviderRow({ provider, onChange }: { provider: any; onChange: () => vo
           {expanded ? <ChevronDown className="h-3 w-3 text-muted-foreground" /> : <ChevronRight className="h-3 w-3 text-muted-foreground" />}
         </div>
       </button>
-
       {expanded && (
-        <div className="px-4 pb-4 border-t border-border/20 pt-3 space-y-3">
-          {/* Key input */}
-          <div>
-            <label className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1.5 block">
-              API Key {provider.keySource === "env" && <span className="text-blue-400">(currently from .env — UI entry will override)</span>}
-            </label>
-            <div className="flex gap-2">
-              <input
-                type="password"
-                value={keyInput}
-                onChange={e => setKeyInput(e.target.value)}
-                onKeyDown={e => e.key === "Enter" && save()}
-                placeholder={provider.active ? "Enter new key to replace…" : `${provider.envKey.toLowerCase().replace(/_/g, "-")}…`}
-                className="flex-1 bg-white/5 rounded-lg px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground/40 border border-border/50 focus:outline-none focus:border-amber-400/50 font-mono"
-              />
-              <button
-                onClick={save}
-                disabled={!keyInput.trim() || saving}
-                className="bg-amber-500/20 text-amber-400 rounded-lg px-4 py-2 text-xs font-medium hover:bg-amber-500/30 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
-                {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : "Save"}
-              </button>
-            </div>
-          </div>
-
-          {/* Actions */}
-          {provider.active && (
-            <div className="flex gap-2">
-              <button
-                onClick={test}
-                disabled={testing}
-                className="flex items-center gap-1.5 glass rounded-lg px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50">
-                {testing ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3" />}
-                Test connection
-              </button>
-              {provider.keySource === "db" && (
-                <button
-                  onClick={remove}
-                  className="flex items-center gap-1.5 glass rounded-lg px-3 py-1.5 text-xs text-muted-foreground hover:text-red-400 transition-colors">
-                  <Trash2 className="h-3 w-3" />
-                  Delete key
-                </button>
-              )}
-            </div>
-          )}
-
-          {/* Test result */}
-          {testResult && (
-            <div className={`rounded-lg px-3 py-2 text-xs ${testResult.ok ? "bg-emerald-500/10 text-emerald-400" : "bg-red-500/10 text-red-400"}`}>
-              {testResult.ok ? (
-                <>
-                  <div className="flex items-center gap-1.5 mb-1">
-                    <CheckCircle2 className="h-3 w-3" />
-                    <span className="font-medium">Connection OK</span>
-                    <span className="text-[10px] text-muted-foreground ml-auto font-mono">{testResult.latencyMs}ms</span>
-                  </div>
-                  <div className="text-[10px] font-mono opacity-70">Model: {testResult.model} → "{testResult.response}"</div>
-                </>
-              ) : (
-                <div className="flex items-start gap-1.5">
-                  <AlertCircle className="h-3 w-3 mt-0.5 shrink-0" />
-                  <span className="break-all">{testResult.error}</span>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Env key hint */}
-          <div className="text-[10px] text-muted-foreground/60">
+        <div className="px-4 pb-3 border-t border-border/20 pt-2">
+          <InlineKeyEditor provider={provider} onChange={onChange} />
+          <div className="text-[9px] text-muted-foreground/60 mt-2">
             env var: <code className="bg-white/5 px-1 rounded font-mono">{provider.envKey}</code>
           </div>
         </div>
@@ -190,11 +270,24 @@ export default function Cortex() {
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<"all" | "active" | "inactive">("all");
+  const [selectedCapability, setSelectedCapability] = useState<string | null>(null);
+  const refreshTimer = useRef<number | null>(null);
 
-  const refresh = () => api.getCortexStatus().then(d => setData(d)).catch(() => {});
+  const refresh = async () => {
+    try {
+      const d = await api.getCortexStatus();
+      setData(d);
+    } catch {}
+  };
 
   useEffect(() => {
-    api.getCortexStatus().then(d => { setData(d); setLoading(false); }).catch(() => setLoading(false));
+    (async () => {
+      await refresh();
+      setLoading(false);
+    })();
+    // Auto-refresh every 10s to keep status live
+    refreshTimer.current = window.setInterval(refresh, 10000);
+    return () => { if (refreshTimer.current) clearInterval(refreshTimer.current); };
   }, []);
 
   if (loading) return <div className="min-h-screen flex items-center justify-center"><Loader2 className="h-6 w-6 animate-spin text-amber-400" /></div>;
@@ -212,7 +305,7 @@ export default function Cortex() {
     return true;
   });
 
-  // Group capabilities
+  // Group capabilities by type
   const capByType: Record<string, any[]> = {};
   for (const cap of capabilities) {
     const key = cap.capability;
@@ -221,7 +314,7 @@ export default function Cortex() {
   }
 
   return (
-    <div className="min-h-screen dot-grid">
+    <div className="min-h-screen dot-grid relative">
       <div className="px-8 pt-8 pb-6">
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}>
           <div className="flex items-center gap-2 mb-4">
@@ -229,7 +322,7 @@ export default function Cortex() {
             <span className="text-xs font-medium text-amber-400 tracking-wider uppercase">Cortex</span>
           </div>
           <h1 className="text-3xl font-bold tracking-tight mb-2">AI Model Platform</h1>
-          <p className="text-sm text-muted-foreground">Enter an API key → provider activates → routing updates automatically.</p>
+          <p className="text-sm text-muted-foreground">Click any capability to see all providers. Add keys inline — routing updates live.</p>
 
           <div className="flex gap-6 mt-4">
             <div className="glass rounded-xl px-4 py-3">
@@ -249,16 +342,20 @@ export default function Cortex() {
       </div>
 
       <div className="px-8 pb-8 space-y-6">
-        {/* Capabilities */}
+        {/* Capabilities — now CLICKABLE */}
         <div>
-          <h2 className="text-sm font-semibold text-foreground mb-3">Capabilities</h2>
+          <h2 className="text-sm font-semibold text-foreground mb-3">Capabilities <span className="text-[10px] text-muted-foreground font-normal">· click to add providers</span></h2>
           <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-2">
             {Object.entries(capByType).map(([capKey, tasks]) => {
               const meta = CAPABILITY_META[capKey] ?? { icon: Cpu, label: capKey, color: "text-muted-foreground" };
               const Icon = meta.icon;
               const anyActive = tasks.some((t: any) => t.active);
               return (
-                <div key={capKey} className={`glass rounded-xl p-3 ${anyActive ? "border-amber-400/20" : "opacity-50"}`}>
+                <motion.button key={capKey}
+                  initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
+                  whileHover={{ y: -2 }} transition={{ duration: 0.15 }}
+                  onClick={() => setSelectedCapability(capKey)}
+                  className={`glass rounded-xl p-3 text-left cursor-pointer hover:bg-white/[0.07] transition-colors ${anyActive ? "border-amber-400/20" : ""} ${selectedCapability === capKey ? "ring-1 ring-amber-400/50" : ""}`}>
                   <div className="flex items-center gap-2 mb-2">
                     <Icon className={`h-4 w-4 ${anyActive ? meta.color : "text-muted-foreground/50"}`} />
                     <span className="text-xs font-medium text-foreground">{meta.label}</span>
@@ -272,14 +369,12 @@ export default function Cortex() {
                         <div className={`w-1 h-1 rounded-full ${t.active ? "bg-emerald-400" : "bg-muted-foreground/20"}`} />
                         <span className="text-[10px] text-muted-foreground truncate">{TASK_LABELS[t.task] ?? t.task}</span>
                         {t.active && t.availableModels?.[0] && (
-                          <span className="text-[9px] text-amber-400 font-mono ml-auto truncate max-w-[80px]">
-                            {t.availableModels[0].name}
-                          </span>
+                          <span className="text-[9px] text-amber-400 font-mono ml-auto truncate max-w-[80px]">{t.availableModels[0].name}</span>
                         )}
                       </div>
                     ))}
                   </div>
-                </div>
+                </motion.button>
               );
             })}
           </div>
@@ -297,9 +392,10 @@ export default function Cortex() {
               return (
                 <div key={cap.task} className={`grid grid-cols-[1fr_100px_100px_1fr] gap-0 px-4 py-2.5 text-sm items-center ${i % 2 === 0 ? "" : "bg-white/[0.02]"}`}>
                   <span className="text-foreground text-xs">{TASK_LABELS[cap.task] ?? cap.task}</span>
-                  <Badge className={`text-[9px] w-fit ${meta ? `${meta.color} bg-white/5` : "text-muted-foreground bg-white/5"}`}>
+                  <button onClick={() => setSelectedCapability(cap.capability)}
+                    className={`text-[9px] w-fit px-2 py-0.5 rounded ${meta ? `${meta.color} bg-white/5 hover:bg-white/10` : "text-muted-foreground bg-white/5"} transition-colors`}>
                     {meta?.label ?? cap.capability}
-                  </Badge>
+                  </button>
                   <span className="text-[10px] text-muted-foreground font-mono">{cap.preferredTier}</span>
                   {cap.active ? (
                     <div className="flex items-center gap-1.5">
@@ -322,10 +418,10 @@ export default function Cortex() {
           </div>
         </div>
 
-        {/* Providers — interactive */}
+        {/* Providers */}
         <div>
           <div className="flex items-center justify-between mb-3">
-            <h2 className="text-sm font-semibold text-foreground">Providers — click to add API key</h2>
+            <h2 className="text-sm font-semibold text-foreground">Providers — all {totalProviders}</h2>
             <div className="flex gap-1.5">
               {(["all", "active", "inactive"] as const).map(f => (
                 <button key={f} onClick={() => setFilter(f)}
@@ -343,6 +439,22 @@ export default function Cortex() {
           </div>
         </div>
       </div>
+
+      {/* Capability Detail Slide-out Panel */}
+      <AnimatePresence>
+        {selectedCapability && (
+          <>
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+              onClick={() => setSelectedCapability(null)}
+              className="fixed inset-0 bg-black/40 backdrop-blur-sm z-40" />
+            <CapabilityPanel
+              capability={selectedCapability}
+              onClose={() => setSelectedCapability(null)}
+              onChange={refresh}
+            />
+          </>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

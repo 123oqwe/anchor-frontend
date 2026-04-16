@@ -74,4 +74,5 @@ export const api = {
   setProviderKey: (id: string, key: string) => req("PUT", `/api/admin/providers/${id}/key`, { key }),
   deleteProviderKey: (id: string) => req("DELETE", `/api/admin/providers/${id}/key`),
   testProvider: (id: string) => req<any>("POST", `/api/admin/providers/${id}/test`, {}),
+  getCapabilityRoster: (cap: string) => req<any>("GET", `/api/admin/capability/${cap}`),
 };
