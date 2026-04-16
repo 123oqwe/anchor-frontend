@@ -74,6 +74,7 @@ export const TASK_ROUTES: Record<string, TaskRoute> = {
   decision:              { capability: "text",       tier: "strong" },
   general_chat:          { capability: "text",       tier: "balanced" },
   react_execution:       { capability: "text",       tier: "strong" },
+  graph_extraction:      { capability: "text",       tier: "balanced" },
   twin_edit_learning:    { capability: "text",       tier: "cheap" },
   twin_result_learning:  { capability: "text",       tier: "cheap" },
   morning_digest:        { capability: "text",       tier: "cheap" },

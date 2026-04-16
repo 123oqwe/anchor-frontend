@@ -39,7 +39,17 @@ router.get("/", (_req, res) => {
     };
   });
 
-  res.json({ domains, totalNodes: rows.length });
+  // Include edges
+  const edges = db.prepare(`
+    SELECT e.id, e.from_node_id as fromId, e.to_node_id as toId, e.type, e.weight,
+           f.label as fromLabel, t.label as toLabel
+    FROM graph_edges e
+    JOIN graph_nodes f ON e.from_node_id = f.id
+    JOIN graph_nodes t ON e.to_node_id = t.id
+    WHERE e.user_id=?
+  `).all(DEFAULT_USER_ID);
+
+  res.json({ domains, totalNodes: rows.length, edges });
 });
 
 router.post("/nodes", (req, res) => {

@@ -43,7 +43,9 @@ export async function twinLearnFromEdits(changes: StepChange[]) {
       writeTwinInsight({ category: parsed.category ?? "behavior", insight: parsed.insight, confidence: parsed.confidence ?? 0.7 });
       // L1 writeback: Twin insight → graph node (preference or behavioral_pattern)
       const nodeType = (parsed.category ?? "").includes("preference") ? "preference" : "behavioral_pattern";
-      createNode({ domain: "growth", label: parsed.insight.slice(0, 60), type: nodeType, status: "active", captured: "Twin Agent inference", detail: parsed.insight });
+      // Short label: category + first meaningful phrase, not full insight text
+      const shortLabel = `${(parsed.category ?? "pattern").replace(/_/g, " ")}: ${parsed.insight.split(/[.!,;]/)[0].trim()}`.slice(0, 40);
+      createNode({ domain: "growth", label: shortLabel, type: nodeType, status: "active", captured: "Twin Agent inference", detail: parsed.insight });
       log("Twin Agent", `Edit insight: ${parsed.insight.slice(0, 60)}`);
       bus.publish({ type: "TWIN_UPDATED", payload: { insight: parsed.insight } });
     }

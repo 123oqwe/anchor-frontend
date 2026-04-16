@@ -52,8 +52,8 @@ router.post("/personal", async (req: Request, res: Response) => {
 
     logExecution("Decision Agent", `${result.isPlan ? "Plan" : "Advice"}: ${message.substring(0, 60)}`);
 
-    // L1 Graph growth: async extract nodes/edges from user message (non-blocking)
-    extractFromMessage(message).catch(err => console.error("[Extractor] Error:", err.message));
+    // L1 Graph growth: debounced extract nodes/edges from user message (non-blocking)
+    extractFromMessage(message);
 
     res.json({
       id: msgId, role: result.isPlan ? "draft" : "advisor", content: result.raw,
@@ -90,9 +90,9 @@ router.post("/confirm", async (req: Request, res: Response) => {
 
   logExecution("Decision Agent", `Plan confirmed: ${user_steps.length} steps, ${changes.filter(c => c.type !== "kept").length} changes`);
 
-  // L1 writeback: record the decision in the graph
-  const stepSummary = user_steps.map((s: any) => s.content).join("; ").slice(0, 100);
-  createNode({ domain: "work", label: `Decision: ${stepSummary}`, type: "decision", status: "active", captured: "Plan confirmed by user", detail: `${user_steps.length} steps confirmed` });
+  // L1 writeback: record the decision in the graph (short label, steps in detail)
+  const firstStep = user_steps[0]?.content?.slice(0, 30) ?? "Plan";
+  createNode({ domain: "work", label: `Decision: ${firstStep}`, type: "decision", status: "active", captured: "Plan confirmed by user", detail: user_steps.map((s: any) => s.content).join("; ").slice(0, 200) });
 
   bus.publish({ type: "USER_CONFIRMED", payload: { original_steps, user_steps, changes } });
   res.json({ ok: true, changes });
