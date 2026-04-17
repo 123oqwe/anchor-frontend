@@ -1,7 +1,8 @@
 import { Router } from "express";
 import { setApiKey, deleteApiKey, getApiKey } from "../infra/compute/keys.js";
 import { getRegistryInfo } from "../execution/registry.js";
-import { getPermissionStatus } from "../permission/gate.js";
+import { getPermissionStatus, activateLockdown, deactivateLockdown, isLocked, setTrustLevel } from "../permission/gate.js";
+import { type PermissionLevel, type ActionClass } from "../permission/levels.js";
 import { PROVIDERS, MODELS } from "../infra/compute/providers.js";
 import { getCapabilityRoster } from "../infra/compute/index.js";
 import {
@@ -167,7 +168,23 @@ router.get("/tools", (_req, res) => {
 // ── Permission status ───────────────────────────────────────────────────────
 
 router.get("/permissions", (_req, res) => {
-  res.json(getPermissionStatus());
+  res.json({ ...getPermissionStatus(), lockdown: isLocked() });
+});
+
+router.post("/permissions/lockdown", (_req, res) => {
+  activateLockdown();
+  res.json({ ok: true, lockdown: true });
+});
+
+router.delete("/permissions/lockdown", (_req, res) => {
+  deactivateLockdown();
+  res.json({ ok: true, lockdown: false });
+});
+
+router.put("/permissions/trust/:actionClass", (req, res) => {
+  const { level } = req.body;
+  setTrustLevel(req.params.actionClass as ActionClass, level as PermissionLevel);
+  res.json({ ok: true });
 });
 
 export default router;

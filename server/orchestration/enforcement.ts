@@ -39,11 +39,15 @@ const PROHIBITED_HANDOFFS: [Component, Component, string][] = [
   ["execution", "decision", "Execution cannot re-invoke Decision"],
 ];
 
+import { checkViolation } from "../permission/gate.js";
+
 export function validateHandoff(from: Component, to: Component): { valid: boolean; reason?: string } {
   // Check prohibited first
   for (const [pFrom, pTo, reason] of PROHIBITED_HANDOFFS) {
     if (from === pFrom && to === pTo) {
       console.error(`[Enforcement] PROHIBITED HANDOFF: ${from} → ${to}: ${reason}`);
+      // Report to L6 contract violation system
+      checkViolation(`Component emits execution command: ${from} → ${to}`);
       return { valid: false, reason };
     }
   }

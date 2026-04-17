@@ -18,9 +18,9 @@ import { nanoid } from "nanoid";
 // ── Gate types ──────────────────────────────────────────────────────────────
 
 export type GateOutcome =
-  | { decision: "allow"; auditId: string }
-  | { decision: "require_confirmation"; reason: string; actionClass: ActionClass }
-  | { decision: "deny"; reason: string };
+  | { decision: "allow"; auditId: string; boundary: "advisory_only" | "draft_candidate" }
+  | { decision: "require_confirmation"; reason: string; actionClass: ActionClass; boundary: "approval_required" }
+  | { decision: "deny"; reason: string; boundary: "no_direct_execution" };
 
 export interface GateRequest {
   actionClass: ActionClass;
@@ -91,9 +91,11 @@ export function recordSuccess(actionClass: ActionClass): void {
         if (LEVEL_ORDER.indexOf(newLevel) > LEVEL_ORDER.indexOf("L2_confirm_execute")) return;
       }
       score.currentLevel = newLevel;
-      score.successes = 0; // reset counter
-      console.log(`[Trust] ${actionClass} upgraded to ${newLevel} (10 consecutive successes)`);
-      auditLog("TrustProgression", `${actionClass} upgraded to ${newLevel}`);
+      score.successes = 0;
+      // Start cooldown: audit next 5 calls after upgrade
+      upgradeCooldowns.set(actionClass, { upgradeTime: Date.now(), observationCount: 0 });
+      console.log(`[Trust] ${actionClass} upgraded to ${newLevel} (10 consecutive successes, 5-call cooldown)`);
+      auditLog("TrustProgression", `${actionClass} upgraded to ${newLevel} (cooldown active)`);
     }
   }
 }
@@ -151,21 +153,26 @@ export function checkViolation(violation: string): { severity: string; response:
 // ── Main gate ───────────────────────────────────────────────────────────────
 
 export function checkPermission(req: GateRequest): GateOutcome {
+  // 0. Emergency lockdown check
+  if (systemLockdown) {
+    return { decision: "deny", reason: "System is in emergency lockdown — all actions denied", boundary: "no_direct_execution" };
+  }
+
   const policy = DEFAULT_POLICY[req.actionClass];
-  if (!policy) return { decision: "deny", reason: `Unknown action class: ${req.actionClass}` };
+  if (!policy) return { decision: "deny", reason: `Unknown action class: ${req.actionClass}`, boundary: "no_direct_execution" };
 
   // 1. Derived-write prohibition
   const derivedBlock = checkDerivedWriteProhibition(req);
-  if (derivedBlock) return { decision: "deny", reason: derivedBlock };
+  if (derivedBlock) return { decision: "deny", reason: derivedBlock, boundary: "no_direct_execution" };
 
   // 2. Cron source restriction
   if (req.source === "cron" && !policy.cronAllowed) {
-    return { decision: "deny", reason: `${req.actionClass} not allowed from cron jobs` };
+    return { decision: "deny", reason: `${req.actionClass} not allowed from cron jobs`, boundary: "no_direct_execution" };
   }
 
   // 3. Rate limit check
   if (!checkRateLimit(req.actionClass, policy.maxPerHour)) {
-    return { decision: "deny", reason: `Rate limit exceeded: ${req.actionClass} (max ${policy.maxPerHour}/hour)` };
+    return { decision: "deny", reason: `Rate limit exceeded: ${req.actionClass} (max ${policy.maxPerHour}/hour)`, boundary: "no_direct_execution" };
   }
 
   // 4. Get effective trust level (may be upgraded/downgraded from default)
@@ -177,39 +184,97 @@ export function checkPermission(req: GateRequest): GateOutcome {
   }
 
   if (effectiveLevel === "L3_bounded_auto") {
+    // Cooldown: force audit for first 5 calls after trust upgrade
+    if (isInCooldown(req.actionClass)) {
+      auditLog("TrustCooldown", `[${req.actionClass}] Cooldown audit: ${req.description.slice(0, 60)}`);
+    }
     return auditedAllow(req);
   }
 
   if (effectiveLevel === "L1_draft") {
-    return { decision: "require_confirmation", reason: "Action is draft-only at current trust level", actionClass: req.actionClass };
+    return { decision: "require_confirmation", reason: "Action is draft-only at current trust level", actionClass: req.actionClass, boundary: "approval_required" };
   }
 
   if (effectiveLevel === "L0_read_only") {
-    return { decision: "deny", reason: "Action not permitted — system is in read-only mode" };
+    return { decision: "deny", reason: "Action not permitted — system is in read-only mode", boundary: "no_direct_execution" };
   }
 
   // L2 from non-user source
   if (effectiveLevel === "L2_confirm_execute" && req.source !== "user_triggered") {
-    return { decision: "require_confirmation", reason: "Non-user action requires explicit approval", actionClass: req.actionClass };
+    return { decision: "require_confirmation", reason: "Non-user action requires explicit approval", actionClass: req.actionClass, boundary: "approval_required" };
   }
 
-  return { decision: "require_confirmation", reason: "Requires user approval", actionClass: req.actionClass };
+  return { decision: "require_confirmation", reason: "Requires user approval", actionClass: req.actionClass, boundary: "approval_required" };
 }
 
 // ── Audit ────────────────────────────────────────────────────────────────────
 
 function auditedAllow(req: GateRequest): GateOutcome {
   const auditId = nanoid();
-  if (DEFAULT_POLICY[req.actionClass]?.requiresAudit) {
+  const policy = DEFAULT_POLICY[req.actionClass];
+  if (policy?.requiresAudit) {
     auditLog("PermissionGate", `[${req.actionClass}|${req.source}] ${req.description.slice(0, 80)}`);
   }
-  return { decision: "allow", auditId };
+  const boundary = policy?.riskTier === "low" ? "advisory_only" as const : "draft_candidate" as const;
+  return { decision: "allow", auditId, boundary };
 }
 
 function auditLog(agent: string, action: string): void {
   db.prepare(
     "INSERT INTO agent_executions (id, user_id, agent, action, status) VALUES (?,?,?,?,?)"
   ).run(nanoid(), DEFAULT_USER_ID, agent, action, "success");
+}
+
+// ── Emergency lockdown ──────────────────────────────────────────────────────
+
+let systemLockdown = false;
+
+export function activateLockdown(): void {
+  systemLockdown = true;
+  auditLog("LOCKDOWN", "Emergency lockdown activated — all actions denied");
+  console.log("[LOCKDOWN] Emergency lockdown activated");
+}
+
+export function deactivateLockdown(): void {
+  systemLockdown = false;
+  auditLog("LOCKDOWN", "Emergency lockdown deactivated");
+  console.log("[LOCKDOWN] Lockdown deactivated");
+}
+
+export function isLocked(): boolean {
+  return systemLockdown;
+}
+
+// ── Manual trust override ───────────────────────────────────────────────────
+
+export function setTrustLevel(actionClass: ActionClass, level: PermissionLevel): void {
+  const policy = DEFAULT_POLICY[actionClass];
+  if (!policy) return;
+  let score = trustScores.get(actionClass);
+  if (!score) {
+    score = { successes: 0, failures: 0, currentLevel: policy.defaultLevel };
+    trustScores.set(actionClass, score);
+  }
+  score.currentLevel = level;
+  score.successes = 0;
+  score.failures = 0;
+  auditLog("TrustOverride", `${actionClass} manually set to ${level}`);
+}
+
+// ── Trust cooldown after upgrade ────────────────────────────────────────────
+
+const upgradeCooldowns = new Map<ActionClass, { upgradeTime: number; observationCount: number }>();
+const COOLDOWN_OBSERVATIONS = 5; // audit first 5 calls after upgrade
+
+function isInCooldown(actionClass: ActionClass): boolean {
+  const cd = upgradeCooldowns.get(actionClass);
+  if (!cd) return false;
+  if (cd.observationCount >= COOLDOWN_OBSERVATIONS) {
+    upgradeCooldowns.delete(actionClass);
+    return false;
+  }
+  cd.observationCount++;
+  return true;
 }
 
 // ── Status for admin ────────────────────────────────────────────────────────
