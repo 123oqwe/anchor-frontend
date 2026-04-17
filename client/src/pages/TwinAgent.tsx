@@ -26,20 +26,29 @@ export default function TwinAgent() {
   const [projects, setProjects] = useState<any[]>([]);
   const [agentStats, setAgentStats] = useState<any>(null);
   const [loading, setLoading] = useState(true);
-  const [activeStage, setActiveStage] = useState(2);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [activeStage, setActiveStage] = useState<number | null>(null);
 
   const load = async () => {
-    const [evo, ins, projs, agents] = await Promise.all([
-      api.getTwinEvolution(),
-      api.getTwinInsights(),
-      api.getProjects(),
-      api.getAgentStatus(),
-    ]);
-    setEvolution(evo);
-    setInsights(ins);
-    setProjects(projs);
-    setAgentStats(agents.find((a: any) => a.name === "Twin Agent"));
-    setLoading(false);
+    try {
+      const [evo, ins, projs, agents] = await Promise.all([
+        api.getTwinEvolution(),
+        api.getTwinInsights(),
+        api.getProjects(),
+        api.getAgentStatus(),
+      ]);
+      setEvolution(evo);
+      setInsights(ins);
+      setProjects(projs);
+      setAgentStats(agents.find((a: any) => a.name === "Twin Agent"));
+      // Set activeStage to actual level (0-indexed)
+      if (evo?.level != null) setActiveStage(Math.max(0, evo.level - 1));
+      else setActiveStage(0);
+    } catch (err: any) {
+      setLoadError(err.message ?? "Failed to load Twin data");
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => { load(); }, []);

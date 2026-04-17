@@ -54,19 +54,30 @@ export default function Memory() {
   const [newMem, setNewMem] = useState({ type: "episodic" as MemoryType, title: "", content: "", tags: "" });
   const [editId, setEditId] = useState<string | null>(null);
 
+  const [loadError, setLoadError] = useState<string | null>(null);
+
   const load = async () => {
-    const [mems, s, agents] = await Promise.all([
-      api.getMemories({ type: activeFilter !== "all" ? activeFilter : undefined, q: searchQuery || undefined }),
-      api.getMemoryStats(),
-      api.getAgentStatus(),
-    ]);
-    setMemories(mems);
-    setStats(s);
-    setAgentStats(agents.find((a: any) => a.name === "Memory Agent"));
-    setLoading(false);
+    try {
+      const [mems, s, agents] = await Promise.all([
+        api.getMemories({ type: activeFilter !== "all" ? activeFilter : undefined, q: searchQuery || undefined }),
+        api.getMemoryStats(),
+        api.getAgentStatus(),
+      ]);
+      setMemories(mems);
+      setStats(s);
+      setAgentStats(agents.find((a: any) => a.name === "Memory Agent"));
+    } catch (err: any) {
+      setLoadError(err.message ?? "Failed to load memories");
+    } finally {
+      setLoading(false);
+    }
   };
 
-  useEffect(() => { load(); }, [activeFilter, searchQuery]);
+  // Debounced search — waits 400ms after user stops typing
+  useEffect(() => {
+    const timer = setTimeout(() => { load(); }, searchQuery ? 400 : 0);
+    return () => clearTimeout(timer);
+  }, [activeFilter, searchQuery]);
 
   const toggleExpand = (id: string) => setExpandedIds(prev => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next; });
 

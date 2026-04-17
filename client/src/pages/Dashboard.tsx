@@ -29,14 +29,14 @@ const statusColors: Record<string, string> = {
   done: "text-emerald-400/50", blocked: "text-red-400",
 };
 
-function AgentStatus({ name, status, executions }: { name: string; status: string; executions: number }) {
+function AgentStatus({ name, status, executions, errors }: { name: string; status: string; executions: number; errors: number }) {
   return (
     <div className="flex items-center gap-2 text-[10px]">
       <div className={`w-1.5 h-1.5 rounded-full ${status === "running" ? "bg-blue-400 animate-pulse" : status === "success" ? "bg-emerald-400" : status === "error" ? "bg-red-400" : "bg-muted-foreground/30"}`} />
       <span className="text-muted-foreground">{name}</span>
       <div className="flex items-center gap-1 font-mono">
         <Plus className="h-2 w-2 text-emerald-400" /><span className="text-emerald-400">{executions}</span>
-        <Minus className="h-2 w-2 text-red-400 ml-1" /><span className="text-red-400">0</span>
+        <Minus className="h-2 w-2 text-red-400 ml-1" /><span className="text-red-400">{errors}</span>
       </div>
     </div>
   );
@@ -44,7 +44,7 @@ function AgentStatus({ name, status, executions }: { name: string; status: strin
 
 export default function Dashboard() {
   const [quickInput, setQuickInput] = useState("");
-  const [stateValues, setStateValues] = useState([72, 85, 34]);
+  const [stateValues, setStateValues] = useState<number[] | null>(null);
   const [activeDomain, setActiveDomain] = useState<string | null>(null);
   const [expandedItem, setExpandedItem] = useState<string | null>(null);
   const [domains, setDomains] = useState<any[]>([]);
@@ -59,6 +59,7 @@ export default function Dashboard() {
     { label: "Stress", icon: Activity, color: "var(--stress-color)" },
   ];
 
+  const [loadError, setLoadError] = useState<string | null>(null);
   useEffect(() => {
     Promise.all([
       api.getGraph(),
@@ -69,16 +70,23 @@ export default function Dashboard() {
       setDomains(graph.domains);
       setTotalNodes(graph.totalNodes);
       setTodayDecision(decision);
-      if (state) setStateValues([state.energy, state.focus, state.stress]);
+      setStateValues([state?.energy ?? 70, state?.focus ?? 70, state?.stress ?? 30]);
       setAgentStatus(agents);
+    }).catch((err) => {
+      setLoadError(err.message ?? "Failed to load dashboard");
     }).finally(() => setLoading(false));
   }, []);
 
+  // Debounced state update — only fires API after 500ms of no changes
+  const stateTimerRef = { current: null as ReturnType<typeof setTimeout> | null };
   const handleStateChange = (idx: number, val: number) => {
-    const next = [...stateValues];
+    const next = [...(stateValues ?? [70, 70, 30])];
     next[idx] = val;
     setStateValues(next);
-    api.updateState({ energy: next[0], focus: next[1], stress: next[2] }).catch(() => {});
+    if (stateTimerRef.current) clearTimeout(stateTimerRef.current);
+    stateTimerRef.current = setTimeout(() => {
+      api.updateState({ energy: next[0], focus: next[1], stress: next[2] }).catch(() => {});
+    }, 500);
   };
 
   const [quickResponse, setQuickResponse] = useState<string | null>(null);
@@ -141,7 +149,7 @@ export default function Dashboard() {
                 <h4 className="text-[10px] font-semibold text-muted-foreground tracking-wider uppercase mb-3">Active Agents</h4>
                 <div className="space-y-2">
                   {agentStatus.slice(0, 4).map(a => (
-                    <AgentStatus key={a.name} name={a.name} status={a.successes > 0 ? "success" : "idle"} executions={a.successes} />
+                    <AgentStatus key={a.name} name={a.name} status={a.successes > 0 ? "success" : "idle"} executions={a.successes} errors={a.failures ?? 0} />
                   ))}
                 </div>
               </div>
@@ -164,13 +172,13 @@ export default function Dashboard() {
                       <Icon className="h-4 w-4" style={{ color: metric.color }} />
                       <span className="text-sm font-medium text-foreground">{metric.label}</span>
                     </div>
-                    <span className="text-2xl font-bold font-mono" style={{ color: metric.color }}>{stateValues[i]}</span>
+                    <span className="text-2xl font-bold font-mono" style={{ color: metric.color }}>{stateValues?.[i] ?? 0}</span>
                   </div>
                   <div className="relative h-1.5 rounded-full bg-white/5 overflow-hidden">
                     <motion.div className="absolute inset-y-0 left-0 rounded-full" style={{ backgroundColor: metric.color }}
-                      initial={{ width: 0 }} animate={{ width: `${stateValues[i]}%` }} transition={{ duration: 1, delay: 0.2 + i * 0.1 }} />
+                      initial={{ width: 0 }} animate={{ width: `${stateValues?.[i] ?? 0}%` }} transition={{ duration: 1, delay: 0.2 + i * 0.1 }} />
                   </div>
-                  <input type="range" min={0} max={100} value={stateValues[i]}
+                  <input type="range" min={0} max={100} value={stateValues?.[i] ?? 0}
                     onChange={e => handleStateChange(i, parseInt(e.target.value))}
                     className="w-full mt-3 h-1 appearance-none bg-transparent cursor-pointer opacity-0 group-hover:opacity-100 transition-opacity [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:shadow-md" />
                 </div>

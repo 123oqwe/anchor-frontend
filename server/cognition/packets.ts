@@ -60,7 +60,7 @@ export interface DecisionPacket {
 // ── Stage Trace — records what happened at each stage of the pipeline ────────
 
 export interface StageTrace {
-  stage: "constraint_extraction" | "option_generation" | "twin_alignment" | "boundary_classification" | "delta_selection";
+  stage: "constraint_extraction" | "option_generation" | "twin_alignment" | "boundary_classification" | "delta_selection" | "skill_match";
   input: string;
   output: string;
   durationMs?: number;
