@@ -2,6 +2,7 @@ import { schedule } from "node-cron";
 import { db, DEFAULT_USER_ID } from "../infra/storage/db.js";
 import { nanoid } from "nanoid";
 import { text } from "../infra/compute/index.js";
+import { expireWorkingMemory, promoteRecurringPatterns } from "../memory/retrieval.js";
 
 function log(agent: string, action: string, status = "success") {
   db.prepare("INSERT INTO agent_executions (id, user_id, agent, action, status) VALUES (?,?,?,?,?)")
@@ -94,6 +95,25 @@ schedule("0 22 * * *", () => {
   }
 });
 
+// ── Every day 03:00 — Memory Maintenance ─────────────────────────────────────
+schedule("0 3 * * *", () => {
+  try {
+    const expired = expireWorkingMemory();
+    if (expired > 0) {
+      log("Memory Agent", `Working memory cleanup: ${expired} expired entries removed`);
+      console.log(`[Cron] Memory cleanup: ${expired} working memories expired.`);
+    }
+
+    const promoted = promoteRecurringPatterns();
+    if (promoted > 0) {
+      log("Memory Agent", `Pattern promotion: ${promoted} episodic patterns upgraded to semantic`);
+      console.log(`[Cron] Memory promotion: ${promoted} patterns promoted to semantic.`);
+    }
+  } catch (err: any) {
+    console.error("[Cron] Memory maintenance failed:", err.message);
+  }
+});
+
 export function startCronJobs() {
-  console.log("⏰ Cron jobs scheduled: Morning Digest(8am) | Decay Check(every 6h) | Twin Reflection(Mon 9am) | Stale Tasks(10pm)");
+  console.log("⏰ Cron jobs scheduled: Morning Digest(8am) | Decay(6h) | Twin(Mon 9am) | Stale Tasks(10pm) | Memory Maintenance(3am)");
 }

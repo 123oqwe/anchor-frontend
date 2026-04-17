@@ -59,12 +59,12 @@ JSON FORMAT (when actionable):
 PLAIN TEXT FORMAT (when conversational):
 Just respond naturally in 2-3 sentences. Be direct and personal.`;
 
-function buildSystemPrompt(): string {
+function buildSystemPrompt(userMessage: string): string {
   return DECISION_SYSTEM_PROMPT
     .replace("{STATE}", serializeStateForPrompt())
     .replace("{GRAPH}", graphPrompt())
     .replace("{EDGES}", serializeEdgesForPrompt())
-    .replace("{MEMORY}", memoryPrompt())
+    .replace("{MEMORY}", memoryPrompt(userMessage))  // context-aware retrieval
     .replace("{TWIN}", serializeTwinForPrompt());
 }
 
@@ -73,7 +73,7 @@ export async function decide(
   message: string,
   history: { role: "user" | "assistant"; content: string }[]
 ): Promise<DecisionResult> {
-  const system = buildSystemPrompt();
+  const system = buildSystemPrompt(message);
 
   const raw = await text({
     task: "decision",
