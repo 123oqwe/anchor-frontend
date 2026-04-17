@@ -11,12 +11,42 @@
  * Also generates: why-this-now explanation, conflict flags, confidence score.
  * Pure cognition — no side effects.
  */
+import { createHash } from "crypto";
 import { text } from "../infra/compute/index.js";
 import { db, DEFAULT_USER_ID } from "../infra/storage/db.js";
 import { serializeForPrompt as graphPrompt, serializeStateForPrompt, serializeEdgesForPrompt, getNodesByType } from "../graph/reader.js";
 import { serializeForPrompt as memoryPrompt, serializeTwinForPrompt } from "../memory/retrieval.js";
 import { type DecisionPacket, type ContextPacket, type StageTrace } from "./packets.js";
 import { shouldActivateSwarm, runSwarm } from "./swarm.js";
+import { detectSkillMatch, buildSkillBasedPlan } from "./skills.js";
+import { getPromptAdaptations } from "./evolution.js";
+
+// ── Decision cache (LRU, 50 entries, 5min TTL) ────────────────────────────
+const CACHE_MAX = 50;
+const CACHE_TTL_MS = 5 * 60 * 1000;
+const decisionCache = new Map<string, { result: DecisionResult; timestamp: number }>();
+
+function getCacheKey(message: string, history?: { role: string; content: string }[]): string {
+  const graphVersion = (db.prepare("SELECT MAX(updated_at) as v FROM graph_nodes WHERE user_id=?").get(DEFAULT_USER_ID) as any)?.v ?? "";
+  const memVersion = (db.prepare("SELECT MAX(created_at) as v FROM memories WHERE user_id=?").get(DEFAULT_USER_ID) as any)?.v ?? "";
+  const historyHash = history?.length ? createHash("md5").update(history.map(h => `${h.role}:${h.content.slice(0, 50)}`).join("|")).digest("hex").slice(0, 8) : "0";
+  return createHash("md5").update(`${message}|${graphVersion}|${memVersion}|${historyHash}`).digest("hex");
+}
+
+function getFromCache(key: string): DecisionResult | null {
+  const entry = decisionCache.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.timestamp > CACHE_TTL_MS) { decisionCache.delete(key); return null; }
+  return entry.result;
+}
+
+function putInCache(key: string, result: DecisionResult): void {
+  if (decisionCache.size >= CACHE_MAX) {
+    const oldest = decisionCache.keys().next().value;
+    if (oldest) decisionCache.delete(oldest);
+  }
+  decisionCache.set(key, { result, timestamp: Date.now() });
+}
 
 export interface DecisionResult {
   raw: string;
@@ -115,13 +145,17 @@ OUTPUT FORMAT — For actionable requests, respond with JSON (no markdown fences
 For conversational questions, respond with plain text (2-3 sentences, direct, personal). Still include why-this-now thinking internally.`;
 
 function buildSystemPrompt(userMessage: string): string {
-  return DECISION_SYSTEM_PROMPT
+  const base = DECISION_SYSTEM_PROMPT
     .replace("{STATE}", serializeStateForPrompt())
     .replace("{GRAPH}", graphPrompt())
     .replace("{EDGES}", serializeEdgesForPrompt())
     .replace("{MEMORY}", memoryPrompt(userMessage))
     .replace("{TWIN}", serializeTwinForPrompt())
     .replace("{CONSTITUTION}", buildValueConstitution());
+
+  // Append evolution-based prompt adaptations
+  const adaptations = getPromptAdaptations();
+  return base + adaptations;
 }
 
 /** Run the Decision Agent 5-stage pipeline. */
@@ -129,6 +163,35 @@ export async function decide(
   message: string,
   history: { role: "user" | "assistant"; content: string }[]
 ): Promise<DecisionResult> {
+  // Cache check: return cached result for identical requests
+  const cacheKey = getCacheKey(message, history);
+  const cached = getFromCache(cacheKey);
+  if (cached) {
+    console.log("[Decision Agent] Cache hit");
+    return cached;
+  }
+
+  // "I don't know" threshold: if we have too little context, be honest
+  const nodeCount = (db.prepare("SELECT COUNT(*) as c FROM graph_nodes WHERE user_id=?").get(DEFAULT_USER_ID) as any)?.c ?? 0;
+  const memCount = (db.prepare("SELECT COUNT(*) as c FROM memories WHERE user_id=?").get(DEFAULT_USER_ID) as any)?.c ?? 0;
+  if (nodeCount < 3 && memCount < 5 && history.length < 3) {
+    return {
+      raw: "I don't have enough context about you yet to give a truly personal recommendation. Tell me more about your situation — your goals, constraints, and what you're working on — so I can give you advice that's actually grounded in your reality.",
+      isPlan: false,
+      packet: null,
+    };
+  }
+
+  // Skill-aware routing: check if a learned skill matches this request
+  const userState = db.prepare("SELECT energy, focus, stress FROM user_state WHERE user_id=?").get(DEFAULT_USER_ID) as any;
+  const skillMatch = detectSkillMatch(message, userState ?? { energy: 70, focus: 70, stress: 30 });
+  if (skillMatch && skillMatch.confidence > 0.7) {
+    console.log(`[Decision Agent] Skill match: "${skillMatch.name}" (${(skillMatch.confidence * 100).toFixed(0)}%)`);
+    const skillResult = await buildSkillBasedPlan(skillMatch, message);
+    putInCache(cacheKey, skillResult);
+    return skillResult;
+  }
+
   const system = buildSystemPrompt(message);
 
   const raw = await text({
@@ -233,7 +296,9 @@ export async function decide(
     await verifyTrajectoryConfidence(packet, message);
   }
 
-  return { raw, isPlan: !!structured, packet, structured };
+  const result = { raw, isPlan: !!structured, packet, structured };
+  putInCache(cacheKey, result);
+  return result;
 }
 
 // ── Trajectory Confidence Verifier (ACC pattern, 2026) ──────────────────────

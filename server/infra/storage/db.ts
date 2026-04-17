@@ -255,6 +255,90 @@ db.exec(`
   );
 
   CREATE INDEX IF NOT EXISTS idx_perm_audit ON permission_audit(action_class, created_at);
+
+  -- Performance indexes
+  CREATE INDEX IF NOT EXISTS idx_graph_nodes_user_status ON graph_nodes(user_id, status);
+  CREATE INDEX IF NOT EXISTS idx_graph_nodes_user_domain ON graph_nodes(user_id, domain);
+  CREATE INDEX IF NOT EXISTS idx_memories_user_type ON memories(user_id, type, created_at);
+  CREATE INDEX IF NOT EXISTS idx_messages_user_mode ON messages(user_id, mode, created_at);
+  CREATE INDEX IF NOT EXISTS idx_executions_user_created ON agent_executions(user_id, created_at);
+  CREATE INDEX IF NOT EXISTS idx_executions_user_agent ON agent_executions(user_id, agent);
+  CREATE INDEX IF NOT EXISTS idx_tasks_project_status ON tasks(project_id, status);
+  CREATE INDEX IF NOT EXISTS idx_insights_user ON twin_insights(user_id, created_at);
+  CREATE INDEX IF NOT EXISTS idx_quests_user ON twin_quests(user_id);
+
+  -- Satisfaction signals (Phase 0.5: user satisfaction tracking)
+  CREATE TABLE IF NOT EXISTS satisfaction_signals (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    signal_type TEXT NOT NULL,
+    context TEXT NOT NULL DEFAULT '',
+    value REAL NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_satisfaction_user ON satisfaction_signals(user_id, created_at);
+
+  -- Evolution state (Phase 2: personal evolution engine)
+  CREATE TABLE IF NOT EXISTS evolution_state (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    dimension TEXT NOT NULL,
+    current_value TEXT NOT NULL,
+    previous_value TEXT NOT NULL DEFAULT '',
+    evidence_count INTEGER NOT NULL DEFAULT 0,
+    last_updated TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(user_id, dimension)
+  );
+
+  -- Decision traces (Phase 3: system evolution)
+  CREATE TABLE IF NOT EXISTS decision_traces (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    task_type TEXT NOT NULL,
+    model_used TEXT NOT NULL,
+    input_tokens INTEGER,
+    output_tokens INTEGER,
+    latency_ms INTEGER,
+    user_satisfaction REAL,
+    outcome TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_traces_task ON decision_traces(task_type, created_at);
+
+  -- Prompt strategies (Phase 3: system evolution)
+  CREATE TABLE IF NOT EXISTS prompt_strategies (
+    id TEXT PRIMARY KEY,
+    task_type TEXT NOT NULL,
+    strategy_name TEXT NOT NULL,
+    template_patch TEXT NOT NULL DEFAULT '',
+    success_rate REAL NOT NULL DEFAULT 0,
+    sample_count INTEGER NOT NULL DEFAULT 0,
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  -- System metrics (Phase 4: reliability)
+  CREATE TABLE IF NOT EXISTS system_metrics (
+    id TEXT PRIMARY KEY,
+    metric_name TEXT NOT NULL,
+    value REAL NOT NULL,
+    tags TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_metrics ON system_metrics(metric_name, created_at);
+
+  -- Events (Phase 4: event persistence)
+  CREATE TABLE IF NOT EXISTS events (
+    id TEXT PRIMARY KEY,
+    type TEXT NOT NULL,
+    payload TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_events_type ON events(type, created_at);
 `);
 
 // ─── Default user seed ────────────────────────────────────────────────────────
@@ -408,6 +492,13 @@ function seedIfEmpty() {
   run();
   console.log("✅ Database seeded with default data");
 }
+
+// Migrate: add new columns to skills table (safe for existing DBs)
+try { db.exec("ALTER TABLE skills ADD COLUMN confidence REAL NOT NULL DEFAULT 0.5"); } catch {}
+try { db.exec("ALTER TABLE skills ADD COLUMN last_used TEXT"); } catch {}
+try { db.exec("ALTER TABLE skills ADD COLUMN success_rate REAL NOT NULL DEFAULT 0"); } catch {}
+try { db.exec("ALTER TABLE skills ADD COLUMN context_conditions TEXT NOT NULL DEFAULT '{}'"); } catch {}
+try { db.exec("ALTER TABLE skills ADD COLUMN source TEXT NOT NULL DEFAULT 'dream_engine'"); } catch {}
 
 seedIfEmpty();
 

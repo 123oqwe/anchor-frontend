@@ -5,6 +5,7 @@
 import { Router, Request, Response } from "express";
 import { db, DEFAULT_USER_ID } from "../infra/storage/db.js";
 import { nanoid } from "nanoid";
+import { z } from "zod";
 import { bus, type EditableStep, type StepChange } from "../orchestration/bus.js";
 import { text } from "../infra/compute/index.js";
 import { decide } from "../cognition/decision.js";
@@ -12,6 +13,25 @@ import { extractFromMessage } from "../cognition/extractor.js";
 import { createNode } from "../graph/writer.js";
 import { writeMemory, flushConversationToMemory, checkPeriodicNudge } from "../memory/retrieval.js";
 import { trackPlanDecision } from "../cognition/twin.js";
+import { tryCrystallizeSkill, evolveSkill, penalizeSkill } from "../cognition/skills.js";
+
+// ── Zod schemas ─────────────────────────────────────────────────────────────
+const MessageBody = z.object({ message: z.string().min(1) });
+const UniversalBody = z.object({ message: z.string().min(1), context: z.string().optional() });
+const ConfirmBody = z.object({
+  original_steps: z.array(z.object({ id: z.any(), content: z.string() }).passthrough()),
+  user_steps: z.array(z.object({ id: z.any(), content: z.string() }).passthrough()),
+});
+const RejectBody = z.object({
+  messageId: z.string().optional(),
+  steps: z.array(z.any()).optional(),
+});
+
+/** Record a satisfaction signal. */
+function recordSatisfaction(signalType: string, context: string, value: number) {
+  db.prepare("INSERT INTO satisfaction_signals (id, user_id, signal_type, context, value) VALUES (?,?,?,?,?)")
+    .run(nanoid(), DEFAULT_USER_ID, signalType, context, value);
+}
 
 const router = Router();
 
@@ -54,8 +74,9 @@ router.get("/history/:mode", (req, res) => {
 // ── Decision Agent (Personal Advisor) ───────────────────────────────────────
 
 router.post("/personal", async (req: Request, res: Response) => {
-  const { message } = req.body;
-  if (!message) return res.status(400).json({ error: "message required" });
+  const parsed = MessageBody.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message ?? "Invalid input" });
+  const { message } = parsed.data;
 
   try {
     // Load conversation history
@@ -117,9 +138,9 @@ router.post("/personal", async (req: Request, res: Response) => {
 // ── Confirm Plan ─────────────────────────────────────────────────────────────
 
 router.post("/confirm", async (req: Request, res: Response) => {
-  const { original_steps, user_steps } = req.body;
-  if (!Array.isArray(original_steps) || !Array.isArray(user_steps))
-    return res.status(400).json({ error: "original_steps and user_steps required" });
+  const parsed = ConfirmBody.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message ?? "Invalid input" });
+  const { original_steps, user_steps } = parsed.data;
 
   const changes: StepChange[] = [];
   const originalMap = new Map(original_steps.map((s: EditableStep) => [s.id, s]));
@@ -135,7 +156,15 @@ router.post("/confirm", async (req: Request, res: Response) => {
     if (!userIds.has(os.id)) changes.push({ type: "deleted", step_id: os.id, before: os.content });
   }
 
-  logExecution("Decision Agent", `Plan confirmed: ${user_steps.length} steps, ${changes.filter(c => c.type !== "kept").length} changes`);
+  const editCount = changes.filter(c => c.type !== "kept").length;
+  const editRatio = user_steps.length > 0 ? editCount / user_steps.length : 0;
+  logExecution("Decision Agent", `Plan confirmed: ${user_steps.length} steps, ${editCount} changes`);
+
+  // Satisfaction: plan confirmed = positive, edit ratio = modification signal
+  recordSatisfaction("plan_confirmed", `${user_steps.length} steps`, 1.0);
+  if (editRatio > 0) {
+    recordSatisfaction("plan_modified", `${editCount}/${user_steps.length} steps edited`, 1.0 - editRatio);
+  }
 
   // L1 writeback: record the decision in the graph (short label, steps in detail)
   const firstStep = user_steps[0]?.content?.slice(0, 30) ?? "Plan";
@@ -145,14 +174,38 @@ router.post("/confirm", async (req: Request, res: Response) => {
   // No duplicate writeMemory here.
 
   bus.publish({ type: "USER_CONFIRMED", payload: { original_steps, user_steps, changes } });
+
+  // Skills: try to crystallize a new skill from confirmed patterns (non-blocking)
+  const stepContents = user_steps.map((s: any) => s.content);
+  tryCrystallizeSkill(stepContents, editRatio).catch(() => {});
+
+  // Skills: if this plan was generated from a skill, evolve it based on user edits
+  // (skill_source is embedded in the plan JSON by buildSkillBasedPlan)
+  try {
+    const lastDraft = db.prepare("SELECT content FROM messages WHERE user_id=? AND role='draft' ORDER BY created_at DESC LIMIT 1").get(DEFAULT_USER_ID) as any;
+    if (lastDraft?.content) {
+      const draftParsed = JSON.parse(lastDraft.content.match(/\{[\s\S]*\}/)?.[0] ?? "{}");
+      if (draftParsed.skill_source) {
+        if (editRatio > 0) {
+          evolveSkill(draftParsed.skill_source, stepContents);
+        }
+      }
+    }
+  } catch {}
+
   res.json({ ok: true, changes });
 });
 
 // ── Reject Plan ──────────────────────────────────────────────────────────────
 
 router.post("/reject", (req: Request, res: Response) => {
-  const { messageId, steps } = req.body;
+  const parsed = RejectBody.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message ?? "Invalid input" });
+  const { messageId, steps } = parsed.data;
   const stepSummary = Array.isArray(steps) ? steps.map((s: any) => s.content).join("; ").slice(0, 150) : "";
+
+  // Satisfaction: plan rejected = negative signal
+  recordSatisfaction("plan_rejected", stepSummary.slice(0, 100), -1.0);
 
   // Track rejection for Twin pattern learning
   trackPlanDecision("rejected", stepSummary, Array.isArray(steps) ? steps.length : 0);
@@ -160,6 +213,19 @@ router.post("/reject", (req: Request, res: Response) => {
   if (messageId) {
     db.prepare("UPDATE messages SET draft_status='rejected' WHERE id=? AND user_id=?").run(messageId, DEFAULT_USER_ID);
   }
+
+  // Skills: if rejected plan was from a skill, penalize it
+  try {
+    if (messageId) {
+      const msg = db.prepare("SELECT content FROM messages WHERE id=? AND user_id=?").get(messageId, DEFAULT_USER_ID) as any;
+      if (msg?.content) {
+        const draftParsed = JSON.parse(msg.content.match(/\{[\s\S]*\}/)?.[0] ?? "{}");
+        if (draftParsed.skill_source) {
+          penalizeSkill(draftParsed.skill_source);
+        }
+      }
+    }
+  } catch {}
 
   logExecution("Decision Agent", `Plan rejected: ${stepSummary.slice(0, 60)}`);
   res.json({ ok: true });
@@ -201,15 +267,18 @@ router.post("/first-insight", async (req: Request, res: Response) => {
 // ── Universal Input (talk to Anchor from any page) ──────────────────────────
 
 router.post("/universal", async (req: Request, res: Response) => {
-  const { message, context } = req.body;
-  if (!message) return res.status(400).json({ error: "message required" });
+  const parsed = UniversalBody.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message ?? "Invalid input" });
+  const { message, context } = parsed.data;
 
   try {
     const historyRows = db.prepare("SELECT role, content FROM messages WHERE user_id=? AND mode='personal' ORDER BY created_at DESC LIMIT 5").all(DEFAULT_USER_ID) as any[];
     const history = historyRows.reverse().map(r => ({ role: (r.role === "user" ? "user" : "assistant") as "user" | "assistant", content: r.content as string }));
 
-    // Add page context if provided (e.g. "user is looking at Dashboard, overdue items")
-    const augmented = context ? `[Context: user is on ${context}]\n${message}` : message;
+    // Add page context if provided — sanitize to prevent prompt injection
+    const ALLOWED_PAGES = ["Dashboard", "Advisor", "Twin", "Memory", "Workspace", "Settings", "Admin"];
+    const safeContext = context && ALLOWED_PAGES.some(p => context.startsWith(p)) ? context.replace(/[\n\r\[\]]/g, " ").slice(0, 50) : undefined;
+    const augmented = safeContext ? `[Context: user is on ${safeContext}]\n${message}` : message;
 
     const result = await decide(augmented, history);
 
@@ -266,8 +335,9 @@ router.get("/digest", (_req, res) => {
 // ── General AI ───────────────────────────────────────────────────────────────
 
 router.post("/general", async (req: Request, res: Response) => {
-  const { message } = req.body;
-  if (!message) return res.status(400).json({ error: "message required" });
+  const parsed = MessageBody.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message ?? "Invalid input" });
+  const { message } = parsed.data;
 
   try {
     const historyRows = db.prepare("SELECT role, content FROM messages WHERE user_id=? AND mode='general' ORDER BY created_at DESC LIMIT 10").all(DEFAULT_USER_ID) as any[];

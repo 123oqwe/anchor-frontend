@@ -17,7 +17,7 @@ import { persistInsightAsSemanticMemory, recordGraphChange, grantTaskCompletionX
 
 // ── Event → Trigger → Mode → Dispatch ───────────────────────────────────────
 
-function dispatch(event: AnchorEvent): void {
+async function dispatch(event: AnchorEvent): Promise<void> {
   let triggerType: TriggerType;
   switch (event.type) {
     case "USER_CONFIRMED":  triggerType = "USER_CONFIRM"; break;
@@ -35,10 +35,10 @@ function dispatch(event: AnchorEvent): void {
   // Persist event
   persistEvent(event, "processed");
 
-  // Route to handler
+  // Route to handler — await async handlers to catch errors properly
   switch (event.type) {
-    case "USER_CONFIRMED":  handleConfirmed(event.payload);  break;
-    case "EXECUTION_DONE":  handleExecutionDone(event.payload); break;
+    case "USER_CONFIRMED":  await handleConfirmed(event.payload);  break;
+    case "EXECUTION_DONE":  await handleExecutionDone(event.payload); break;
     case "TWIN_UPDATED":    handleTwinUpdated(event.payload);   break;
     case "GRAPH_UPDATED":   handleGraphUpdated(event.payload);  break;
     case "TASK_COMPLETED":  handleTaskCompleted(event.payload); break;
@@ -92,16 +92,16 @@ function handleTaskCompleted(payload: any) {
 // ── Wire with error routing ─────────────────────────────────────────────────
 
 export function startEventHandlers() {
-  bus.on("event", (e: AnchorEvent) => {
+  bus.on("event", async (e: AnchorEvent) => {
     try {
-      dispatch(e);
+      await dispatch(e);
     } catch (err: any) {
       console.error(`[Orchestrator] Event ${e.type} failed:`, err.message);
       const shouldRetry = recordFailure(e, err.message);
       if (shouldRetry) {
         console.log(`[Orchestrator] Retrying ${e.type}...`);
-        setTimeout(() => {
-          try { dispatch(e); } catch (retryErr: any) {
+        setTimeout(async () => {
+          try { await dispatch(e); } catch (retryErr: any) {
             recordFailure(e, retryErr.message);
           }
         }, 1000);
