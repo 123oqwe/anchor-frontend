@@ -84,6 +84,38 @@ export const DOMAIN_META: Record<Domain, { name: string; icon: string }> = {
 
 export type Stability = "stable" | "volatile" | "decaying";
 
+// ── Temporal semantics ──────────────────────────────────────────────────────
+
+/** Time horizon of a node — is this about now, the past, or the future? */
+export type TemporalHorizon = "current" | "historical" | "future" | "recurring";
+
+/** Truth boundary — how certain is this information? */
+export type TruthBoundary = "confirmed" | "inferred" | "reported" | "speculative";
+
+export const NODE_TEMPORAL_DEFAULTS: Record<NodeType, TemporalHorizon> = {
+  identity: "current",
+  value: "current",
+  preference: "current",
+  routine: "recurring",
+  relationship: "current",
+  behavioral_pattern: "current",
+  goal: "future",
+  constraint: "current",
+  person: "current",
+  resource: "current",
+  state: "current",
+  task: "future",
+  commitment: "future",
+  project: "current",
+  decision: "historical",
+  risk: "future",
+  opportunity: "future",
+  observation: "historical",
+  outcome: "historical",
+  artifact: "current",
+  external_context: "current",
+};
+
 /** Which node types are long-lived vs short-lived. */
 export const NODE_STABILITY: Record<NodeType, Stability> = {
   identity:           "stable",

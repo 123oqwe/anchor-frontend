@@ -56,13 +56,36 @@ function checkRateLimit(actionClass: ActionClass, maxPerHour: number): boolean {
 
 // ── Trust progression state ─────────────────────────────────────────────────
 
-const trustScores = new Map<ActionClass, { successes: number; failures: number; currentLevel: PermissionLevel }>();
+// Trust state: in-memory cache backed by DB persistence
+const trustCache = new Map<ActionClass, { successes: number; failures: number; currentLevel: PermissionLevel }>();
+
+function loadTrustFromDB(): void {
+  const rows = db.prepare("SELECT action_class, current_level, successes, failures FROM trust_state").all() as any[];
+  for (const r of rows) {
+    trustCache.set(r.action_class as ActionClass, {
+      successes: r.successes,
+      failures: r.failures,
+      currentLevel: r.current_level as PermissionLevel,
+    });
+  }
+}
+
+function saveTrustToDB(actionClass: ActionClass): void {
+  const score = trustCache.get(actionClass);
+  if (!score) return;
+  db.prepare(
+    "INSERT INTO trust_state (action_class, current_level, successes, failures, updated_at) VALUES (?,?,?,?,datetime('now')) ON CONFLICT(action_class) DO UPDATE SET current_level=excluded.current_level, successes=excluded.successes, failures=excluded.failures, updated_at=excluded.updated_at"
+  ).run(actionClass, score.currentLevel, score.successes, score.failures);
+}
+
+// Load on module init
+try { loadTrustFromDB(); } catch {}
 
 function getTrustLevel(actionClass: ActionClass): PermissionLevel {
   const policy = DEFAULT_POLICY[actionClass];
   if (!policy) return "L2_confirm_execute";
 
-  const score = trustScores.get(actionClass);
+  const score = trustCache.get(actionClass);
   if (!score) return policy.defaultLevel;
 
   return score.currentLevel;
@@ -73,13 +96,14 @@ export function recordSuccess(actionClass: ActionClass): void {
   const policy = DEFAULT_POLICY[actionClass];
   if (!policy) return;
 
-  let score = trustScores.get(actionClass);
+  let score = trustCache.get(actionClass);
   if (!score) {
     score = { successes: 0, failures: 0, currentLevel: policy.defaultLevel };
-    trustScores.set(actionClass, score);
+    trustCache.set(actionClass, score);
   }
 
   score.successes++;
+  saveTrustToDB(actionClass);
 
   // Trust progression: after 10 clean successes, upgrade one level
   if (score.successes >= 10 && score.failures === 0) {
@@ -102,16 +126,17 @@ export function recordSuccess(actionClass: ActionClass): void {
 
 /** After failed execution, record failure and potentially downgrade. */
 export function recordFailure(actionClass: ActionClass): void {
-  let score = trustScores.get(actionClass);
+  let score = trustCache.get(actionClass);
   if (!score) {
     const policy = DEFAULT_POLICY[actionClass];
     if (!policy) return;
     score = { successes: 0, failures: 0, currentLevel: policy.defaultLevel };
-    trustScores.set(actionClass, score);
+    trustCache.set(actionClass, score);
   }
 
   score.failures++;
-  score.successes = 0; // reset success streak
+  score.successes = 0;
+  saveTrustToDB(actionClass);
 
   // Downgrade after 3 failures
   if (score.failures >= 3) {
@@ -212,11 +237,21 @@ export function checkPermission(req: GateRequest): GateOutcome {
 function auditedAllow(req: GateRequest): GateOutcome {
   const auditId = nanoid();
   const policy = DEFAULT_POLICY[req.actionClass];
+  const boundary = policy?.riskTier === "low" ? "advisory_only" as const : "draft_candidate" as const;
   if (policy?.requiresAudit) {
     auditLog("PermissionGate", `[${req.actionClass}|${req.source}] ${req.description.slice(0, 80)}`);
   }
-  const boundary = policy?.riskTier === "low" ? "advisory_only" as const : "draft_candidate" as const;
+  // Append-only permission audit (L6 compliance)
+  persistPermissionAudit(req.actionClass, "allow", boundary, req.source, req.description);
   return { decision: "allow", auditId, boundary };
+}
+
+function persistPermissionAudit(actionClass: string, decision: string, boundary: string, source: string, description: string): void {
+  try {
+    db.prepare(
+      "INSERT INTO permission_audit (id, action_class, decision, boundary, source, description) VALUES (?,?,?,?,?,?)"
+    ).run(nanoid(), actionClass, decision, boundary, source, description.slice(0, 200));
+  } catch {}
 }
 
 function auditLog(agent: string, action: string): void {
@@ -250,10 +285,10 @@ export function isLocked(): boolean {
 export function setTrustLevel(actionClass: ActionClass, level: PermissionLevel): void {
   const policy = DEFAULT_POLICY[actionClass];
   if (!policy) return;
-  let score = trustScores.get(actionClass);
+  let score = trustCache.get(actionClass);
   if (!score) {
     score = { successes: 0, failures: 0, currentLevel: policy.defaultLevel };
-    trustScores.set(actionClass, score);
+    trustCache.set(actionClass, score);
   }
   score.currentLevel = level;
   score.successes = 0;
@@ -287,7 +322,7 @@ export function getPermissionStatus() {
     riskTier: p.riskTier,
     maxPerHour: p.maxPerHour,
     cronAllowed: p.cronAllowed,
-    trustScore: trustScores.get(p.actionClass) ?? null,
+    trustScore: trustCache.get(p.actionClass) ?? null,
   }));
   return { policies, universalRulesCount: 8, contractViolationTypes: CONTRACT_VIOLATIONS.length };
 }

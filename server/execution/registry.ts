@@ -36,7 +36,9 @@ export interface ToolResult {
   data?: any;           // structured data for tool composition
   error?: string;
   shouldRetry?: boolean;
-  rollback?: () => void; // optional rollback function
+  rollback?: () => Promise<void> | void;  // undo this action
+  verifiable?: boolean;  // can this result be verified?
+  verifyFn?: () => Promise<boolean>; // returns true if result still valid
 }
 
 export interface ExecutionContext {
@@ -128,6 +130,44 @@ export async function executeTool(
     recordFailure(tool.actionClass);
     return result;
   }
+}
+
+// ── Rollback stack (for undo on failure) ────────────────────────────────────
+
+const rollbackStack: { toolName: string; rollback: () => Promise<void> | void }[] = [];
+
+export function pushRollback(toolName: string, rollback: () => Promise<void> | void): void {
+  rollbackStack.push({ toolName, rollback });
+}
+
+/** Execute all rollbacks in reverse order (last-in-first-out). */
+export async function executeRollbacks(): Promise<number> {
+  let count = 0;
+  while (rollbackStack.length > 0) {
+    const entry = rollbackStack.pop()!;
+    try {
+      await entry.rollback();
+      count++;
+      console.log(`[Rollback] Rolled back: ${entry.toolName}`);
+      logToolCall(entry.toolName, { action: "rollback" }, { success: true, output: "rolled back" }, 0);
+    } catch (err: any) {
+      console.error(`[Rollback] Failed for ${entry.toolName}: ${err.message}`);
+    }
+  }
+  return count;
+}
+
+/** Verify the last N tool results are still valid. */
+export async function verifyResults(results: ToolResult[]): Promise<{ verified: number; failed: number }> {
+  let verified = 0, failed = 0;
+  for (const r of results) {
+    if (r.verifiable && r.verifyFn) {
+      const ok = await r.verifyFn().catch(() => false);
+      if (ok) verified++;
+      else failed++;
+    }
+  }
+  return { verified, failed };
 }
 
 // ── Registry info for admin ─────────────────────────────────────────────────

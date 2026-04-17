@@ -256,6 +256,58 @@ export function promoteRecurringPatterns(): number {
   return promoted;
 }
 
+// ── Route D: For Explanation — why did the system decide this? ──────────────
+
+export function getForExplanation(decisionId: string, limit = 5): MemoryRecord[] {
+  // Find memories that were referenced in this decision's context
+  const rows = db.prepare(
+    "SELECT id, type, title, content, tags, source, confidence, created_at as createdAt FROM memories WHERE user_id=? AND (tags LIKE ? OR content LIKE ?) ORDER BY confidence DESC LIMIT ?"
+  ).all(DEFAULT_USER_ID, `%decision%`, `%${decisionId}%`, limit) as any[];
+  return rows.map(r => ({ ...r, tags: safeParseTags(r.tags) }));
+}
+
+// ── Route E: For Historical — what happened over time? ──────────────────────
+
+export function getHistorical(query: string, daysBack = 30, limit = 20): MemoryRecord[] {
+  const rows = db.prepare(
+    "SELECT id, type, title, content, tags, source, confidence, created_at as createdAt FROM memories WHERE user_id=? AND created_at >= datetime('now', ? || ' days') AND (content LIKE ? OR title LIKE ?) ORDER BY created_at ASC LIMIT ?"
+  ).all(DEFAULT_USER_ID, `-${daysBack}`, `%${query}%`, `%${query}%`, limit) as any[];
+  return rows.map(r => ({ ...r, tags: safeParseTags(r.tags) }));
+}
+
+// ── Memory invalidation + correction ────────────────────────────────────────
+
+/** Invalidate a memory (mark as unreliable, reduce confidence to 0). */
+export function invalidateMemory(memoryId: string, reason: string): void {
+  db.prepare("UPDATE memories SET confidence=0, content = content || ' [INVALIDATED: ' || ? || ']' WHERE id=? AND user_id=?")
+    .run(reason, memoryId, DEFAULT_USER_ID);
+}
+
+/** Correct a memory — update content and mark as corrected. */
+export function correctMemory(memoryId: string, newContent: string, correctionSource: string): void {
+  db.prepare("UPDATE memories SET content=?, source=?, confidence=0.95 WHERE id=? AND user_id=?")
+    .run(`[CORRECTED] ${newContent}`, correctionSource, memoryId, DEFAULT_USER_ID);
+}
+
+/** Find and invalidate memories that conflict with a new fact. */
+export function resolveConflicts(newFact: string, tags: string[]): number {
+  const tagStr = JSON.stringify(tags);
+  // Find memories with same tags but contradicting content
+  const candidates = db.prepare(
+    "SELECT id, content FROM memories WHERE user_id=? AND tags=? AND confidence > 0.3 ORDER BY created_at DESC LIMIT 5"
+  ).all(DEFAULT_USER_ID, tagStr) as any[];
+
+  let invalidated = 0;
+  for (const c of candidates) {
+    // If the old memory's content directly contradicts, invalidate it
+    if (c.content.length > 0 && !c.content.includes("[INVALIDATED") && !c.content.includes("[CORRECTED")) {
+      invalidateMemory(c.id, `Superseded by: ${newFact.slice(0, 80)}`);
+      invalidated++;
+    }
+  }
+  return invalidated;
+}
+
 // ── Pre-conversation flush (OpenClaw pattern) ──────────────────────────────
 
 /**

@@ -233,6 +233,28 @@ db.exec(`
     model_id TEXT NOT NULL,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
+
+  -- L6 trust level persistence (survives restart)
+  CREATE TABLE IF NOT EXISTS trust_state (
+    action_class TEXT PRIMARY KEY,
+    current_level TEXT NOT NULL,
+    successes INTEGER NOT NULL DEFAULT 0,
+    failures INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  -- L6 permission audit log (append-only by convention)
+  CREATE TABLE IF NOT EXISTS permission_audit (
+    id TEXT PRIMARY KEY,
+    action_class TEXT NOT NULL,
+    decision TEXT NOT NULL,
+    boundary TEXT NOT NULL,
+    source TEXT NOT NULL,
+    description TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_perm_audit ON permission_audit(action_class, created_at);
 `);
 
 // ─── Default user seed ────────────────────────────────────────────────────────

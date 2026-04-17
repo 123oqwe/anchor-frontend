@@ -41,7 +41,14 @@ export function registerBuiltinTools(): void {
       const taskId = nanoid();
       db.prepare("INSERT INTO tasks (id, project_id, title, status, priority, tags) VALUES (?,?,?,?,?,?)")
         .run(taskId, project.id, input.title, "todo", input.priority ?? "high", JSON.stringify(["auto", "react"]));
-      return { success: true, output: `Task "${input.title}" created (${input.priority ?? "high"}).`, data: { taskId } };
+      return {
+        success: true,
+        output: `Task "${input.title}" created (${input.priority ?? "high"}).`,
+        data: { taskId },
+        rollback: () => { db.prepare("DELETE FROM tasks WHERE id=?").run(taskId); },
+        verifiable: true,
+        verifyFn: async () => !!(db.prepare("SELECT id FROM tasks WHERE id=?").get(taskId)),
+      };
     },
   });
 

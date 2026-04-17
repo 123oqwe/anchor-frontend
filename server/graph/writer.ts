@@ -9,6 +9,21 @@ import { db, DEFAULT_USER_ID } from "../infra/storage/db.js";
 import { nanoid } from "nanoid";
 import { type NodeType, type EdgeType, type Domain } from "./ontology.js";
 
+// ── Transaction-safe batch operations ───────────────────────────────────────
+
+/** Run multiple graph mutations atomically. If any fails, all roll back. */
+export function transact<T>(fn: () => T): T {
+  return db.transaction(fn)();
+}
+
+/** Optimistic concurrency: check updated_at before writing. Returns false if stale. */
+export function updateNodeIfNotStale(nodeId: string, newStatus: string, expectedUpdatedAt: string): boolean {
+  const result = db.prepare(
+    "UPDATE graph_nodes SET status=?, updated_at=datetime('now') WHERE id=? AND user_id=? AND updated_at=?"
+  ).run(newStatus, nodeId, DEFAULT_USER_ID, expectedUpdatedAt);
+  return result.changes > 0;
+}
+
 // ── Node mutations ──────────────────────────────────────────────────────────
 
 export interface CreateNodeInput {
