@@ -286,7 +286,7 @@ export default function Onboarding() {
 
               <div className="text-center">
                 <p className="text-xs text-muted-foreground mb-4">This is just the beginning. Anchor gets smarter every time you use it.</p>
-                <button onClick={() => navigate("/dashboard")}
+                <button onClick={() => { localStorage.setItem("anchor_onboarded", "1"); navigate("/dashboard"); }}
                   className="bg-primary text-primary-foreground rounded-xl px-8 py-3 text-sm font-medium hover:bg-primary/90 inline-flex items-center gap-2">
                   <ArrowRight className="h-4 w-4" /> Go to Dashboard
                 </button>

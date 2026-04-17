@@ -1,7 +1,7 @@
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/NotFound";
-import { Route, Switch } from "wouter";
+import { Route, Switch, Redirect } from "wouter";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { ThemeProvider } from "./contexts/ThemeContext";
 import AppLayout from "./components/AppLayout";
@@ -34,8 +34,10 @@ function Router() {
       <Route path="/admin/memory"><AdminLayout><MemoryAdmin /></AdminLayout></Route>
       <Route path="/admin/data"><AdminLayout><Data /></AdminLayout></Route>
 
-      {/* Onboarding */}
-      <Route path="/" component={Onboarding} />
+      {/* Onboarding — skip if already completed */}
+      <Route path="/">
+        {localStorage.getItem("anchor_onboarded") ? <Redirect to="/dashboard" /> : <Onboarding />}
+      </Route>
 
       {/* User app */}
       <Route>

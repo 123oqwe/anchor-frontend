@@ -52,7 +52,7 @@ router.post("/quests/:id/complete", (req, res) => {
 
 router.post("/xp", (req, res) => {
   const { amount } = req.body;
-  if (!amount || amount <= 0) return res.status(400).json({ error: "Invalid amount" });
+  if (!amount || typeof amount !== "number" || amount <= 0 || amount > 100) return res.status(400).json({ error: "amount must be 1-100" });
 
   db.transaction(() => {
     db.prepare("UPDATE twin_evolution SET xp=xp+?, updated_at=datetime('now') WHERE user_id=?").run(amount, DEFAULT_USER_ID);

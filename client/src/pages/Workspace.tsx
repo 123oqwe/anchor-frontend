@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   FolderKanban, Plus, Minus, ChevronRight, MoreHorizontal,
-  CheckCircle2, Circle, Clock, Tag, GripVertical, Trash2,
+  CheckCircle2, Circle, Clock, Tag, Trash2,
   Edit3, Search, Bot, Loader2,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -41,7 +41,6 @@ function TaskItem({ task, depth = 0, onStatusChange }: { task: Task; depth?: num
   return (
     <div>
       <div className={`group flex items-center gap-2 py-2 px-3 rounded-lg hover:bg-white/[0.03] transition-colors ${depth > 0 ? "ml-6" : ""}`}>
-        <GripVertical className="h-3 w-3 text-muted-foreground/30 opacity-0 group-hover:opacity-100 transition-opacity cursor-grab shrink-0" />
         {task.subtasks && task.subtasks.length > 0 ? (
           <button onClick={() => setExpanded(!expanded)} className="shrink-0">
             <motion.div animate={{ rotate: expanded ? 90 : 0 }} transition={{ duration: 0.15 }}>
@@ -103,6 +102,7 @@ export default function Workspace() {
   };
 
   const handleDeleteProject = async (id: string) => {
+    if (!window.confirm("Delete this project and all its tasks? This cannot be undone.")) return;
     await api.deleteProject(id);
     if (activeProject === id) setActiveProject(null);
     setProjects(prev => prev.filter(p => p.id !== id));

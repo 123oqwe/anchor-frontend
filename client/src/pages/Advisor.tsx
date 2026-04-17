@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import {
   Send, Sparkles, User, FileText, CheckCircle2, XCircle,
   Lightbulb, Brain, MessageSquare, Bot, Play, ChevronDown, ChevronRight,
-  Loader2, Plus, Minus, Trash2, GripVertical, Edit3,
+  Loader2, Plus, Minus, Trash2, Edit3,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -177,7 +177,6 @@ function EditableStepsCard({
       <div className="p-3 space-y-1.5">
         {steps.map((step, i) => (
           <div key={step.id} className="group flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-white/[0.03] transition-colors">
-            <GripVertical className="h-3 w-3 text-muted-foreground/30 shrink-0" />
             <span className="text-xs text-muted-foreground font-mono w-5 shrink-0">{i + 1}.</span>
 
             {editingId === step.id ? (

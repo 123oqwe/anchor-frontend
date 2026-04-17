@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
-  Search, Brain, Calendar, Lightbulb, Trash2, Edit3, Bot,
+  Search, Brain, Calendar, Lightbulb, Trash2, Bot,
   Plus, Minus, ChevronDown, ChevronRight, Loader2, X, Check,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -82,6 +82,7 @@ export default function Memory() {
   const toggleExpand = (id: string) => setExpandedIds(prev => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next; });
 
   const handleDelete = async (id: string) => {
+    if (!window.confirm("Delete this memory? This cannot be undone.")) return;
     await api.deleteMemory(id);
     setMemories(prev => prev.filter(m => m.id !== id));
   };
