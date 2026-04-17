@@ -148,7 +148,17 @@ Respond with JSON (no markdown):
   let packet: PlanningPacket;
   try {
     const stripped = judgeOutput.replace(/```json\s*/g, "").replace(/```/g, "");
-    const parsed = JSON.parse(stripped.match(/\{[\s\S]*\}/)?.[0] ?? "{}");
+    let jsonStr = stripped.match(/\{[\s\S]*\}/)?.[0] ?? "{}";
+    // Auto-repair truncated JSON
+    if (!jsonStr.trim().endsWith("}")) {
+      const openB = (jsonStr.match(/\[/g) || []).length - (jsonStr.match(/\]/g) || []).length;
+      const openC = (jsonStr.match(/\{/g) || []).length - (jsonStr.match(/\}/g) || []).length;
+      jsonStr += "]".repeat(Math.max(0, openB)) + "}".repeat(Math.max(0, openC));
+    }
+    let parsed: any;
+    try { parsed = JSON.parse(jsonStr); } catch {
+      try { parsed = JSON.parse(jsonStr.replace(/,\s*\]/, "]").replace(/,\s*\}/, "}")); } catch { parsed = {}; }
+    }
 
     // Parse critic for risk map
     let criticParsed: any = {};

@@ -4,6 +4,7 @@ import { nanoid } from "nanoid";
 import { text } from "../infra/compute/index.js";
 import { invalidateSnapshot } from "../memory/retrieval.js";
 import { runDream } from "../memory/dream.js";
+import { detectDrift } from "../cognition/twin.js";
 
 function log(agent: string, action: string, status = "success") {
   db.prepare("INSERT INTO agent_executions (id, user_id, agent, action, status) VALUES (?,?,?,?,?)")
@@ -80,6 +81,9 @@ schedule("0 9 * * 1", async () => {
         .run(nanoid(), DEFAULT_USER_ID, parsed.category ?? "behavior", parsed.insight, parsed.confidence ?? 0.7);
       log("Twin Agent", "Weekly reflection complete");
     }
+
+    // Drift detection: compare recent vs older insights
+    await detectDrift();
   } catch (err: any) {
     console.error("[Cron] Weekly reflection failed:", err.message);
     log("Twin Agent", "Weekly reflection failed", "failed");

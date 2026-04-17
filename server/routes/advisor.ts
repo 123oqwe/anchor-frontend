@@ -11,6 +11,7 @@ import { decide } from "../cognition/decision.js";
 import { extractFromMessage } from "../cognition/extractor.js";
 import { createNode } from "../graph/writer.js";
 import { writeMemory, flushConversationToMemory, checkPeriodicNudge } from "../memory/retrieval.js";
+import { trackPlanDecision } from "../cognition/twin.js";
 
 const router = Router();
 
@@ -152,6 +153,23 @@ router.post("/confirm", async (req: Request, res: Response) => {
 
   bus.publish({ type: "USER_CONFIRMED", payload: { original_steps, user_steps, changes } });
   res.json({ ok: true, changes });
+});
+
+// ── Reject Plan ──────────────────────────────────────────────────────────────
+
+router.post("/reject", (req: Request, res: Response) => {
+  const { messageId, steps } = req.body;
+  const stepSummary = Array.isArray(steps) ? steps.map((s: any) => s.content).join("; ").slice(0, 150) : "";
+
+  // Track rejection for Twin pattern learning
+  trackPlanDecision("rejected", stepSummary, Array.isArray(steps) ? steps.length : 0);
+
+  if (messageId) {
+    db.prepare("UPDATE messages SET draft_status='rejected' WHERE id=? AND user_id=?").run(messageId, DEFAULT_USER_ID);
+  }
+
+  logExecution("Decision Agent", `Plan rejected: ${stepSummary.slice(0, 60)}`);
+  res.json({ ok: true });
 });
 
 // ── General AI ───────────────────────────────────────────────────────────────

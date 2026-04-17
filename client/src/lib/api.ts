@@ -64,7 +64,7 @@ export const api = {
   sendGeneral: (message: string) => req<any>("POST", "/api/advisor/general", { message }),
   sendAgent: (message: string) => req<any>("POST", "/api/advisor/agent", { message }),
   confirmPlan: (original_steps: any[], user_steps: any[]) => req<any>("POST", "/api/advisor/confirm", { original_steps, user_steps }),
-  rejectDraft: (id: string) => req("POST", `/api/advisor/drafts/${id}/reject`, {}),
+  rejectPlan: (messageId: string, steps: any[]) => req("POST", "/api/advisor/reject", { messageId, steps }),
   scanOnboarding: () => req<any>("POST", "/api/advisor/onboarding/scan", {}),
 
   // Cortex

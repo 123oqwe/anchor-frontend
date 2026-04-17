@@ -250,7 +250,10 @@ function ChatView({ mode, suggestions }: { mode: string; suggestions: string[] }
   };
 
   const handleReject = async (msgId: string) => {
+    const msg = messages.find(m => m.id === msgId);
+    const steps = msg?.structured?.editable_steps ?? [];
     setMessages(prev => prev.map(m => m.id === msgId ? { ...m, draftStatus: "rejected" } : m));
+    try { await api.rejectPlan(msgId, steps); } catch {}
   };
 
   if (loading) {

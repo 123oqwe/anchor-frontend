@@ -12,6 +12,7 @@
  * Pure cognition — no side effects.
  */
 import { text } from "../infra/compute/index.js";
+import { db, DEFAULT_USER_ID } from "../infra/storage/db.js";
 import { serializeForPrompt as graphPrompt, serializeStateForPrompt, serializeEdgesForPrompt, getNodesByType } from "../graph/reader.js";
 import { serializeForPrompt as memoryPrompt, serializeTwinForPrompt } from "../memory/retrieval.js";
 import { type DecisionPacket, type ContextPacket, type StageTrace } from "./packets.js";
@@ -320,6 +321,29 @@ function detectFailures(packet: DecisionPacket, userMessage: string): void {
   // 6. No stages trace
   if (packet.stagesTrace.length === 0) {
     failures.push("NO_TRACE: Decision produced without stage-by-stage reasoning trace");
+  }
+
+  // 7. Twin over-reliance — low-confidence twin priors driving the decision
+  const twinTrace = packet.stagesTrace.find(s => s.stage === "twin_alignment");
+  if (twinTrace && twinTrace.output.toLowerCase().includes("strongly influenced") && packet.confidenceScore > 0.8) {
+    // Check if twin insights are actually low-confidence
+    const twinInsights = db.prepare(
+      "SELECT AVG(confidence) as avg FROM twin_insights WHERE user_id=?"
+    ).get(DEFAULT_USER_ID) as any;
+    if (twinInsights?.avg && twinInsights.avg < 0.6) {
+      failures.push("TWIN_OVER_RELIANCE: Decision heavily influenced by twin priors that have low average confidence (<0.6). Consider weighing graph facts more.");
+    }
+  }
+
+  // 8. Open-loop-as-task — treating unresolved questions as completed action items
+  for (const candidate of packet.candidates) {
+    const content = candidate.content.toLowerCase();
+    if (content.includes("?") || content.includes("figure out") || content.includes("determine") || content.includes("find out") || content.includes("investigate")) {
+      // This is a question/investigation, not a concrete action
+      if (!content.includes("research") && !content.includes("ask") && !content.includes("check")) {
+        failures.push(`OPEN_LOOP_AS_TASK: Step ${candidate.id} ("${candidate.content.slice(0, 40)}") looks like an open question, not a concrete action. Rephrase as a specific action.`);
+      }
+    }
   }
 
   if (failures.length > 0) {
