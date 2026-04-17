@@ -287,7 +287,47 @@ export default function Dashboard() {
             )}
           </AnimatePresence>
         </motion.section>
+
+        {/* Activity Feed */}
+        <motion.section initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.4 }}>
+          <div className="glass rounded-2xl p-5">
+            <div className="flex items-center gap-2 mb-3">
+              <Activity className="h-4 w-4 text-primary" />
+              <span className="text-xs font-semibold text-foreground tracking-wide">Recent Activity</span>
+            </div>
+            <ActivityFeed />
+          </div>
+        </motion.section>
       </div>
+    </div>
+  );
+}
+
+function ActivityFeed() {
+  const [events, setEvents] = useState<any[]>([]);
+
+  useEffect(() => {
+    api.getExecutions().then(rows => setEvents(rows.slice(0, 8))).catch(() => {});
+    const interval = setInterval(() => {
+      api.getExecutions().then(rows => setEvents(rows.slice(0, 8))).catch(() => {});
+    }, 10000);
+    return () => clearInterval(interval);
+  }, []);
+
+  if (events.length === 0) return <p className="text-xs text-muted-foreground">No activity yet</p>;
+
+  return (
+    <div className="space-y-1.5">
+      {events.map((e: any) => (
+        <div key={e.id} className="flex items-center gap-3 py-1.5">
+          <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${e.status === "success" ? "bg-emerald-400" : "bg-red-400"}`} />
+          <span className="text-[10px] text-muted-foreground font-mono w-16 shrink-0">
+            {new Date(e.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+          </span>
+          <Badge className="text-[8px] bg-white/5 text-muted-foreground shrink-0">{e.agent}</Badge>
+          <span className="text-[11px] text-foreground/70 truncate flex-1">{e.action}</span>
+        </div>
+      ))}
     </div>
   );
 }

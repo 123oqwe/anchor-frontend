@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Send, Sparkles, User, FileText, CheckCircle2, XCircle,
-  Lightbulb, Brain, MessageSquare, Bot, Play, ChevronDown,
+  Lightbulb, Brain, MessageSquare, Bot, Play, ChevronDown, ChevronRight,
   Loader2, Plus, Minus, Trash2, GripVertical, Edit3,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -32,6 +32,17 @@ interface Message {
     editable_steps: EditableStep[];
     risk_level: string;
     referenced_nodes: string[];
+    why_this_now?: string;
+    conflict_flags?: string[];
+    confidence?: number;
+  };
+  packet?: {
+    whyThisNow: string;
+    conflictFlags: string[];
+    confidenceScore: number;
+    riskLevel: string;
+    boundaryClassification: string;
+    stagesTrace: { stage: string; output: string }[];
   };
 }
 
@@ -48,13 +59,16 @@ const generalSuggestions = [
 
 function EditableStepsCard({
   structured,
+  packet,
   onConfirm,
   onReject,
 }: {
   structured: Message["structured"];
+  packet?: Message["packet"];
   onConfirm: (original: EditableStep[], edited: EditableStep[]) => void;
   onReject: () => void;
 }) {
+  const [showTrace, setShowTrace] = useState(false);
   const [steps, setSteps] = useState<EditableStep[]>(
     () => structured?.editable_steps?.map(s => ({ ...s })) ?? []
   );
@@ -98,6 +112,64 @@ function EditableStepsCard({
         <p className="text-sm text-foreground font-medium">{structured?.suggestion_summary}</p>
         {structured?.reasoning && (
           <p className="text-xs text-muted-foreground mt-1">{structured.reasoning}</p>
+        )}
+
+        {/* L3 Packet: Why This Now + Confidence + Conflicts */}
+        {packet && (
+          <div className="mt-3 space-y-2">
+            {/* Confidence bar */}
+            {packet.confidenceScore > 0 && (
+              <div className="flex items-center gap-2">
+                <span className="text-[9px] text-muted-foreground uppercase tracking-wider">Confidence</span>
+                <div className="flex-1 h-1.5 bg-white/5 rounded-full overflow-hidden">
+                  <div className={`h-full rounded-full ${packet.confidenceScore > 0.7 ? "bg-emerald-400/60" : packet.confidenceScore > 0.4 ? "bg-amber-400/60" : "bg-red-400/60"}`}
+                    style={{ width: `${packet.confidenceScore * 100}%` }} />
+                </div>
+                <span className="text-[10px] font-mono text-muted-foreground">{Math.round(packet.confidenceScore * 100)}%</span>
+              </div>
+            )}
+
+            {/* Why This Now */}
+            {packet.whyThisNow && (
+              <div className="bg-blue-500/5 border border-blue-500/10 rounded-lg px-3 py-2">
+                <span className="text-[9px] text-blue-400 uppercase tracking-wider font-medium">Why now</span>
+                <p className="text-xs text-foreground/80 mt-0.5">{packet.whyThisNow}</p>
+              </div>
+            )}
+
+            {/* Conflict flags */}
+            {packet.conflictFlags?.length > 0 && (
+              <div className="space-y-1">
+                <span className="text-[9px] text-amber-400 uppercase tracking-wider font-medium">Tensions & Risks</span>
+                {packet.conflictFlags.map((flag, i) => (
+                  <div key={i} className="bg-amber-500/5 border border-amber-500/10 rounded-md px-2.5 py-1.5 text-[11px] text-amber-300/80">
+                    {flag}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Reasoning trace (collapsible) */}
+            {packet.stagesTrace?.length > 0 && (
+              <div>
+                <button onClick={() => setShowTrace(!showTrace)}
+                  className="text-[9px] text-muted-foreground hover:text-foreground flex items-center gap-1 transition-colors">
+                  {showTrace ? <ChevronDown className="h-2.5 w-2.5" /> : <ChevronRight className="h-2.5 w-2.5" />}
+                  Reasoning trace ({packet.stagesTrace.length} stages)
+                </button>
+                {showTrace && (
+                  <div className="mt-1.5 space-y-1 pl-3 border-l border-border/30">
+                    {packet.stagesTrace.map((stage, i) => (
+                      <div key={i} className="text-[10px]">
+                        <span className="text-muted-foreground font-mono">{stage.stage}:</span>
+                        <span className="text-foreground/70 ml-1">{stage.output}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         )}
       </div>
 
@@ -277,6 +349,7 @@ function ChatView({ mode, suggestions }: { mode: string; suggestions: string[] }
                 {msg.role === "draft" && msg.structured && msg.draftStatus === "pending" ? (
                   <EditableStepsCard
                     structured={msg.structured}
+                    packet={msg.packet}
                     onConfirm={(orig, edited) => handleConfirm(msg.id, orig, edited)}
                     onReject={() => handleReject(msg.id)}
                   />
