@@ -7,7 +7,7 @@ import { nanoid } from "nanoid";
 import { db, DEFAULT_USER_ID } from "../infra/storage/db.js";
 import { bus, type StepChange } from "../orchestration/bus.js";
 import { text } from "../infra/compute/index.js";
-import { writeMemory, writeTwinInsight } from "../memory/retrieval.js";
+import { writeMemory, writeTwinInsight, writeDialecticInsight } from "../memory/retrieval.js";
 import { createNode } from "../graph/writer.js";
 
 function log(agent: string, action: string, status = "success") {
@@ -41,11 +41,26 @@ export async function twinLearnFromEdits(changes: StepChange[]) {
     const parsed = JSON.parse(jsonMatch[0]);
     if (parsed?.insight) {
       writeTwinInsight({ category: parsed.category ?? "behavior", insight: parsed.insight, confidence: parsed.confidence ?? 0.7 });
-      // L1 writeback: Twin insight → graph node (preference or behavioral_pattern)
+      // L1 writeback: Twin insight → graph node
       const nodeType = (parsed.category ?? "").includes("preference") ? "preference" : "behavioral_pattern";
-      // Short label: category + first meaningful phrase, not full insight text
       const shortLabel = `${(parsed.category ?? "pattern").replace(/_/g, " ")}: ${parsed.insight.split(/[.!,;]/)[0].trim()}`.slice(0, 40);
       createNode({ domain: "growth", label: shortLabel, type: nodeType, status: "active", captured: "Twin Agent inference", detail: parsed.insight });
+
+      // Dialectic detection: if user MODIFIED a step, check if their edit
+      // contradicts what the system suggested (stated vs observed tension)
+      const modified = changes.filter(c => c.type === "modified");
+      if (modified.length > 0) {
+        for (const m of modified) {
+          if (m.before && m.after && m.before !== m.after) {
+            writeDialecticInsight({
+              stated: `System suggested: "${m.before}"`,
+              observed: `User changed to: "${m.after}"`,
+              tension: `User rejected system suggestion — may indicate a preference the system hasn't learned yet`,
+            });
+          }
+        }
+      }
+
       log("Twin Agent", `Edit insight: ${parsed.insight.slice(0, 60)}`);
       bus.publish({ type: "TWIN_UPDATED", payload: { insight: parsed.insight } });
     }
