@@ -10,7 +10,7 @@ import { text } from "../infra/compute/index.js";
 import { decide } from "../cognition/decision.js";
 import { extractFromMessage } from "../cognition/extractor.js";
 import { createNode } from "../graph/writer.js";
-import { writeMemory } from "../memory/retrieval.js";
+import { writeMemory, flushConversationToMemory, checkPeriodicNudge } from "../memory/retrieval.js";
 
 const router = Router();
 
@@ -61,8 +61,15 @@ router.post("/personal", async (req: Request, res: Response) => {
     const historyRows = db.prepare("SELECT role, content FROM messages WHERE user_id=? AND mode='personal' ORDER BY created_at DESC LIMIT 10").all(DEFAULT_USER_ID) as any[];
     const history = historyRows.reverse().map(r => ({ role: (r.role === "user" ? "user" : "assistant") as "user" | "assistant", content: r.content as string }));
 
+    // L2 Pre-conversation flush: if history is long, save older turns to memory
+    flushConversationToMemory(history, "personal");
+
+    // L2 Periodic nudge: check if there's a recurring pattern to surface
+    const nudge = checkPeriodicNudge();
+    const augmentedMessage = nudge ? `${message}\n\n${nudge}` : message;
+
     // L3 Cognition — pure reasoning
-    const result = await decide(message, history);
+    const result = await decide(augmentedMessage, history);
 
     // Persist to messages
     const msgId = nanoid();

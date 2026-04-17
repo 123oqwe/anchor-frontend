@@ -2,7 +2,8 @@ import { schedule } from "node-cron";
 import { db, DEFAULT_USER_ID } from "../infra/storage/db.js";
 import { nanoid } from "nanoid";
 import { text } from "../infra/compute/index.js";
-import { expireWorkingMemory, promoteRecurringPatterns } from "../memory/retrieval.js";
+import { invalidateSnapshot } from "../memory/retrieval.js";
+import { runDream } from "../memory/dream.js";
 
 function log(agent: string, action: string, status = "success") {
   db.prepare("INSERT INTO agent_executions (id, user_id, agent, action, status) VALUES (?,?,?,?,?)")
@@ -95,22 +96,17 @@ schedule("0 22 * * *", () => {
   }
 });
 
-// ── Every day 03:00 — Memory Maintenance ─────────────────────────────────────
-schedule("0 3 * * *", () => {
+// ── Every day 03:00 — Dream Consolidation ────────────────────────────────────
+schedule("0 3 * * *", async () => {
   try {
-    const expired = expireWorkingMemory();
-    if (expired > 0) {
-      log("Memory Agent", `Working memory cleanup: ${expired} expired entries removed`);
-      console.log(`[Cron] Memory cleanup: ${expired} working memories expired.`);
-    }
-
-    const promoted = promoteRecurringPatterns();
-    if (promoted > 0) {
-      log("Memory Agent", `Pattern promotion: ${promoted} episodic patterns upgraded to semantic`);
-      console.log(`[Cron] Memory promotion: ${promoted} patterns promoted to semantic.`);
+    const stats = await runDream();
+    invalidateSnapshot(); // force memory snapshot refresh after dream
+    const total = stats.pruned + stats.merged + stats.promoted + stats.skillsCreated + stats.timeNormalized + stats.capacityRemoved;
+    if (total > 0) {
+      log("Dream Engine", `Dream: p=${stats.pruned} m=${stats.merged} pro=${stats.promoted} sk=${stats.skillsCreated} t=${stats.timeNormalized} cap=${stats.capacityRemoved}`);
     }
   } catch (err: any) {
-    console.error("[Cron] Memory maintenance failed:", err.message);
+    console.error("[Cron] Dream consolidation failed:", err.message);
   }
 });
 

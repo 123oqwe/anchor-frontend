@@ -87,6 +87,48 @@ db.exec(`
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
+  -- FTS5 full-text search index on memories (hybrid search: keyword + relevance)
+  CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+    title, content, tags,
+    content='memories', content_rowid='rowid'
+  );
+
+  -- Triggers to keep FTS in sync
+  CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
+    INSERT INTO memories_fts(rowid, title, content, tags) VALUES (new.rowid, new.title, new.content, new.tags);
+  END;
+  CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, title, content, tags) VALUES ('delete', old.rowid, old.title, old.content, old.tags);
+  END;
+  CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, title, content, tags) VALUES ('delete', old.rowid, old.title, old.content, old.tags);
+    INSERT INTO memories_fts(rowid, title, content, tags) VALUES (new.rowid, new.title, new.content, new.tags);
+  END;
+
+  -- Learned skills (auto-created from complex task executions)
+  CREATE TABLE IF NOT EXISTS skills (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL,
+    steps TEXT NOT NULL DEFAULT '[]',
+    trigger_pattern TEXT NOT NULL DEFAULT '',
+    use_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  -- Dream log (tracks consolidation runs)
+  CREATE TABLE IF NOT EXISTS dream_log (
+    id TEXT PRIMARY KEY,
+    pruned INTEGER NOT NULL DEFAULT 0,
+    merged INTEGER NOT NULL DEFAULT 0,
+    promoted INTEGER NOT NULL DEFAULT 0,
+    contradictions INTEGER NOT NULL DEFAULT 0,
+    skills_created INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
   CREATE TABLE IF NOT EXISTS projects (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,

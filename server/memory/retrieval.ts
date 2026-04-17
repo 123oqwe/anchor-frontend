@@ -122,12 +122,27 @@ export function getByClass(memClass: MemoryClass, limit = 50): MemoryRecord[] {
   return rows.map(r => ({ ...r, tags: safeParseTags(r.tags) }));
 }
 
-/** Search memories by content (keyword match). */
+/** Search memories using FTS5 full-text search (hybrid: ranked keyword matching).
+ *  Falls back to LIKE if FTS5 table doesn't exist yet. */
 export function searchMemories(query: string, limit = 20): MemoryRecord[] {
-  const rows = db.prepare(
-    "SELECT id, type, title, content, tags, source, confidence, created_at as createdAt FROM memories WHERE user_id=? AND (content LIKE ? OR title LIKE ?) ORDER BY created_at DESC LIMIT ?"
-  ).all(DEFAULT_USER_ID, `%${query}%`, `%${query}%`, limit) as any[];
-  return rows.map(r => ({ ...r, tags: safeParseTags(r.tags) }));
+  try {
+    // FTS5 ranked search — much faster and more relevant than LIKE
+    const rows = db.prepare(`
+      SELECT m.id, m.type, m.title, m.content, m.tags, m.source, m.confidence, m.created_at as createdAt,
+             rank as ftsRank
+      FROM memories_fts fts
+      JOIN memories m ON m.rowid = fts.rowid
+      WHERE memories_fts MATCH ? AND m.user_id = ?
+      ORDER BY rank LIMIT ?
+    `).all(query, DEFAULT_USER_ID, limit) as any[];
+    return rows.map(r => ({ ...r, tags: safeParseTags(r.tags) }));
+  } catch {
+    // Fallback to LIKE if FTS5 not available
+    const rows = db.prepare(
+      "SELECT id, type, title, content, tags, source, confidence, created_at as createdAt FROM memories WHERE user_id=? AND (content LIKE ? OR title LIKE ?) ORDER BY created_at DESC LIMIT ?"
+    ).all(DEFAULT_USER_ID, `%${query}%`, `%${query}%`, limit) as any[];
+    return rows.map(r => ({ ...r, tags: safeParseTags(r.tags) }));
+  }
 }
 
 /** Get memory stats by class. */
@@ -239,6 +254,115 @@ export function promoteRecurringPatterns(): number {
     promoted++;
   }
   return promoted;
+}
+
+// ── Pre-conversation flush (OpenClaw pattern) ──────────────────────────────
+
+/**
+ * When conversation history gets long (8+ turns), summarize older turns
+ * into an episodic memory to prevent info loss during context compression.
+ */
+export function flushConversationToMemory(
+  history: { role: string; content: string }[],
+  mode: string
+): boolean {
+  if (history.length < 8) return false;
+
+  // Take the first half of history and summarize
+  const halfIdx = Math.floor(history.length / 2);
+  const oldTurns = history.slice(0, halfIdx);
+  const summary = oldTurns
+    .filter(h => h.content.length > 10)
+    .map(h => `${h.role}: ${h.content.slice(0, 100)}`)
+    .join(" | ")
+    .slice(0, 300);
+
+  writeMemory({
+    type: "episodic",
+    title: `Conversation summary (${mode})`,
+    content: summary,
+    tags: ["conversation", "flush", mode],
+    source: "Pre-compaction Flush",
+    confidence: 0.75,
+  });
+  return true;
+}
+
+// ── Periodic nudge (Hermes pattern) ─────────────────────────────────────────
+
+let turnsSinceLastNudge = 0;
+
+/**
+ * Every 5 conversation turns, evaluate if there's something worth
+ * persisting as a higher-value memory (semantic promotion candidate).
+ * Returns a hint to the Decision Agent to include in its response.
+ */
+export function checkPeriodicNudge(): string | null {
+  turnsSinceLastNudge++;
+  if (turnsSinceLastNudge < 5) return null;
+  turnsSinceLastNudge = 0;
+
+  // Check if recent episodic memories have a repeating pattern
+  const recent = db.prepare(
+    "SELECT tags, COUNT(*) as cnt FROM memories WHERE user_id=? AND type='episodic' AND created_at >= datetime('now', '-3 days') GROUP BY tags HAVING cnt >= 2 ORDER BY cnt DESC LIMIT 1"
+  ).get(DEFAULT_USER_ID) as any;
+
+  if (recent) {
+    let tags: string[];
+    try { tags = JSON.parse(recent.tags); } catch { return null; }
+    return `[System note: The topic "${tags.join(", ")}" has come up ${recent.cnt} times recently. Consider if this is becoming a pattern worth noting.]`;
+  }
+  return null;
+}
+
+// ── Frozen prompt snapshot (Hermes pattern) ─────────────────────────────────
+
+let frozenSnapshot: string | null = null;
+let snapshotTimestamp = 0;
+const SNAPSHOT_TTL_MS = 5 * 60 * 1000; // 5 minutes — refresh after this
+
+/**
+ * Returns a frozen memory snapshot for prompt injection.
+ * Caches the serialized memory string to enable LLM prefix caching.
+ * Only refreshes every 5 minutes.
+ */
+export function getFrozenSnapshot(userMessage: string): string {
+  const now = Date.now();
+  if (frozenSnapshot && (now - snapshotTimestamp) < SNAPSHOT_TTL_MS) {
+    return frozenSnapshot;
+  }
+  frozenSnapshot = serializeForPrompt(userMessage);
+  snapshotTimestamp = now;
+  return frozenSnapshot;
+}
+
+/** Force-refresh the snapshot (call after Dream consolidation or major memory write). */
+export function invalidateSnapshot(): void {
+  frozenSnapshot = null;
+  snapshotTimestamp = 0;
+}
+
+// ── Dialectic user modeling (Hermes/Honcho pattern) ─────────────────────────
+
+/**
+ * Instead of simple key-value preferences, model the user through
+ * the TENSION between their stated preferences and actual behavior.
+ * Called by Twin Agent to create richer semantic memories.
+ */
+export function writeDialecticInsight(opts: {
+  stated: string;      // what user says they want
+  observed: string;    // what user actually does
+  tension: string;     // the gap between them
+  resolution?: string; // if resolved, how
+}): string {
+  return writeMemory({
+    type: "semantic",
+    title: `Dialectic: ${opts.stated.slice(0, 30)} vs behavior`,
+    content: `Stated: ${opts.stated}. Observed: ${opts.observed}. Tension: ${opts.tension}${opts.resolution ? `. Resolution: ${opts.resolution}` : ""}`,
+    tags: ["dialectic", "twin", "behavioral-gap"],
+    source: "Twin Agent (dialectic)",
+    confidence: 0.85,
+  });
 }
 
 function safeParseTags(raw: string): string[] {
