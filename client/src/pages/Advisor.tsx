@@ -294,10 +294,33 @@ function ChatView({ mode, suggestions }: { mode: string; suggestions: string[] }
     setIsTyping(true);
 
     try {
-      let response: any;
-      if (mode === "personal") response = await api.sendPersonal(text);
-      else response = await api.sendGeneral(text);
-      setMessages(prev => [...prev, response]);
+      if (mode === "personal") {
+        // Streaming response — text appears word by word
+        const streamMsgId = (Date.now() + 1).toString();
+        setMessages(prev => [...prev, {
+          id: streamMsgId,
+          role: "advisor",
+          content: "",
+          timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+        }]);
+        setIsTyping(false); // Hide typing indicator since text is streaming
+
+        const { fullText, id } = await api.sendPersonalStream(text, (chunk) => {
+          setMessages(prev => prev.map(m =>
+            m.id === streamMsgId ? { ...m, content: m.content + chunk } : m
+          ));
+        });
+
+        // Update with final ID from server
+        if (id) {
+          setMessages(prev => prev.map(m =>
+            m.id === streamMsgId ? { ...m, id } : m
+          ));
+        }
+      } else {
+        const response = await api.sendGeneral(text);
+        setMessages(prev => [...prev, response]);
+      }
     } catch {
       setMessages(prev => [...prev, {
         id: (Date.now() + 1).toString(),

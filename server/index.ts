@@ -1,5 +1,6 @@
 import express from "express";
 import { createServer } from "http";
+import { WebSocketServer, WebSocket } from "ws";
 import path from "path";
 import { fileURLToPath } from "url";
 import cookieParser from "cookie-parser";
@@ -71,9 +72,30 @@ async function startServer() {
   startEventHandlers();
   startCronJobs();
 
+  // ── WebSocket — real-time event push to frontend ───────────────────────────
+  const wss = new WebSocketServer({ server, path: "/ws" });
+  const wsClients = new Set<WebSocket>();
+
+  wss.on("connection", (ws) => {
+    wsClients.add(ws);
+    ws.on("close", () => wsClients.delete(ws));
+  });
+
+  // Forward bus events to all connected WebSocket clients
+  const { bus } = await import("./orchestration/bus.js");
+  bus.on("event", (e: any) => {
+    const msg = JSON.stringify({ type: e.type, payload: e.payload });
+    wsClients.forEach((client) => {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(msg);
+      }
+    });
+  });
+
   const port = process.env.PORT || 3000;
   server.listen(port, () => {
     console.log(`🚀 Anchor OS running on http://localhost:${port}/`);
+    console.log(`🔌 WebSocket on ws://localhost:${port}/ws`);
   });
 }
 

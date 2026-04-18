@@ -12,7 +12,7 @@
  * Pure cognition — no side effects.
  */
 import { createHash } from "crypto";
-import { text } from "../infra/compute/index.js";
+import { text, textStream } from "../infra/compute/index.js";
 import { db, DEFAULT_USER_ID } from "../infra/storage/db.js";
 import { serializeForPrompt as graphPrompt, serializeStateForPrompt, serializeEdgesForPrompt, getNodesByType } from "../graph/reader.js";
 import { serializeForPrompt as memoryPrompt, serializeTwinForPrompt } from "../memory/retrieval.js";
@@ -415,4 +415,21 @@ function detectFailures(packet: DecisionPacket, userMessage: string): void {
     packet.conflictFlags = [...packet.conflictFlags, ...failures];
     console.log(`[Decision Agent] Cognitive failures detected: ${failures.join(", ")}`);
   }
+}
+
+// ── Streaming Decision — for SSE responses ─────────────────────────────────
+
+/** Streaming version of decide() — returns async iterable of text chunks + full text promise. */
+export async function decideStream(
+  message: string,
+  history: { role: "user" | "assistant"; content: string }[]
+): Promise<{ stream: AsyncIterable<string>; fullText: Promise<string> }> {
+  const system = buildSystemPrompt(message);
+
+  return textStream({
+    task: "decision",
+    system,
+    messages: [...history, { role: "user", content: message }],
+    maxTokens: 2500,
+  });
 }

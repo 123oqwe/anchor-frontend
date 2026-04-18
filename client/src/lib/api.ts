@@ -10,6 +10,53 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
   return res.json();
 }
 
+/**
+ * Streaming fetch — sends POST, reads SSE chunks, calls onChunk for each.
+ * Returns the full accumulated text when done.
+ */
+async function streamReq(
+  path: string,
+  body: unknown,
+  onChunk: (text: string) => void
+): Promise<{ fullText: string; id?: string }> {
+  const res = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`POST ${path} → ${res.status}`);
+  if (!res.body) throw new Error("No response body");
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let fullText = "";
+  let doneId: string | undefined;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const text = decoder.decode(value, { stream: true });
+    // Parse SSE lines
+    for (const line of text.split("\n")) {
+      if (!line.startsWith("data: ")) continue;
+      try {
+        const data = JSON.parse(line.slice(6));
+        if (data.type === "chunk") {
+          fullText += data.text;
+          onChunk(data.text);
+        } else if (data.type === "done") {
+          doneId = data.id;
+        } else if (data.type === "error") {
+          throw new Error(data.error);
+        }
+      } catch (e: any) {
+        if (e.message && !e.message.includes("Unexpected")) throw e;
+      }
+    }
+  }
+  return { fullText, id: doneId };
+}
+
 export const api = {
   // User
   getProfile: () => req<any>("GET", "/api/user/profile"),
@@ -61,6 +108,8 @@ export const api = {
   // Advisor
   getChatHistory: (mode: string) => req<any[]>("GET", `/api/advisor/history/${mode}`),
   sendPersonal: (message: string) => req<any>("POST", "/api/advisor/personal", { message }),
+  sendPersonalStream: (message: string, onChunk: (text: string) => void) =>
+    streamReq("/api/advisor/personal/stream", { message }, onChunk),
   sendGeneral: (message: string) => req<any>("POST", "/api/advisor/general", { message }),
   sendAgent: (message: string) => req<any>("POST", "/api/advisor/agent", { message }),
   confirmPlan: (original_steps: any[], user_steps: any[]) => req<any>("POST", "/api/advisor/confirm", { original_steps, user_steps }),

@@ -7,8 +7,8 @@ import { db, DEFAULT_USER_ID } from "../infra/storage/db.js";
 import { nanoid } from "nanoid";
 import { z } from "zod";
 import { bus, type EditableStep, type StepChange } from "../orchestration/bus.js";
-import { text } from "../infra/compute/index.js";
-import { decide } from "../cognition/decision.js";
+import { text, textStream } from "../infra/compute/index.js";
+import { decide, decideStream } from "../cognition/decision.js";
 import { extractFromMessage } from "../cognition/extractor.js";
 import { createNode } from "../graph/writer.js";
 import { writeMemory, flushConversationToMemory, checkPeriodicNudge } from "../memory/retrieval.js";
@@ -132,6 +132,55 @@ router.post("/personal", async (req: Request, res: Response) => {
   } catch (err: any) {
     console.error("Decision Agent error:", err);
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Streaming Personal (SSE) ────────────────────────────────────────────────
+
+router.post("/personal/stream", async (req: Request, res: Response) => {
+  const parsed = MessageBody.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message ?? "Invalid input" });
+  const { message } = parsed.data;
+
+  // SSE headers
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    Connection: "keep-alive",
+  });
+
+  try {
+    const historyRows = db.prepare("SELECT role, content FROM messages WHERE user_id=? AND mode='personal' ORDER BY created_at DESC LIMIT 10").all(DEFAULT_USER_ID) as any[];
+    const history = historyRows.reverse().map(r => ({ role: (r.role === "user" ? "user" : "assistant") as "user" | "assistant", content: r.content as string }));
+
+    flushConversationToMemory(history, "personal");
+    const nudge = checkPeriodicNudge();
+    const augmentedMessage = nudge ? `${message}\n\n${nudge}` : message;
+
+    const { stream, fullText } = await decideStream(augmentedMessage, history);
+
+    // Stream chunks to client
+    for await (const chunk of stream) {
+      res.write(`data: ${JSON.stringify({ type: "chunk", text: chunk })}\n\n`);
+    }
+
+    // Get full text and persist
+    const raw = await fullText;
+    const msgId = nanoid();
+    const insertMsg = db.prepare("INSERT INTO messages (id, user_id, mode, role, content, draft_type, draft_status, agent_name) VALUES (?,?,?,?,?,?,?,?)");
+    insertMsg.run(nanoid(), DEFAULT_USER_ID, "personal", "user", message, null, null, null);
+    insertMsg.run(msgId, DEFAULT_USER_ID, "personal", "advisor", raw, null, null, null);
+
+    logExecution("Decision Agent", `Stream: ${message.substring(0, 60)}`);
+    writeMemory({ type: "episodic", title: `Conversation: ${message.slice(0, 50)}`, content: `User: ${message.slice(0, 150)} | Anchor: ${raw.slice(0, 150)}`, tags: extractConversationTags(message), source: "Decision Agent", confidence: 0.8 });
+    extractFromMessage(message);
+
+    // Send final message with ID
+    res.write(`data: ${JSON.stringify({ type: "done", id: msgId })}\n\n`);
+    res.end();
+  } catch (err: any) {
+    res.write(`data: ${JSON.stringify({ type: "error", error: err.message })}\n\n`);
+    res.end();
   }
 });
 

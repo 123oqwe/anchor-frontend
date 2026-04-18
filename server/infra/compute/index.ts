@@ -11,7 +11,7 @@
  * Fallback: if first-choice model fails, tries the next candidate.
  */
 
-import { generateText, stepCountIs, type ModelMessage, type ToolSet, type GenerateTextResult } from "ai";
+import { generateText, streamText as aiStreamText, stepCountIs, type ModelMessage, type ToolSet, type GenerateTextResult } from "ai";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
@@ -147,6 +147,52 @@ export async function text(opts: {
       responsePreview: result.text,
     };
   }, { inputPreview: lastMsg });
+}
+
+/**
+ * Streaming text generation — returns an async iterable of text chunks.
+ * Used by Advisor for real-time SSE responses.
+ */
+export async function textStream(opts: {
+  task: string;
+  system: string;
+  messages: { role: "user" | "assistant"; content: string }[];
+  maxTokens?: number;
+}): Promise<{ stream: AsyncIterable<string>; fullText: Promise<string> }> {
+  const route = TASK_ROUTES[opts.task];
+  if (!route) throw new Error(`Unknown task: ${opts.task}`);
+
+  const candidates = getCandidates(route.capability, route.tier);
+  if (candidates.length === 0) throw new Error(`No model available for task "${opts.task}"`);
+
+  const model = candidates[0];
+  const instance = createModelInstance(model);
+  console.log(`[Cortex] ${opts.task} (stream) → ${model.name} (${model.provider})`);
+
+  const result = aiStreamText({
+    model: instance,
+    system: opts.system,
+    messages: opts.messages as ModelMessage[],
+    maxOutputTokens: opts.maxTokens ?? 2500,
+  });
+
+  // Tee the stream: one side for caller to iterate, other side accumulates full text
+  let fullTextResolve: (text: string) => void;
+  const fullTextPromise = new Promise<string>((resolve) => { fullTextResolve = resolve; });
+  let accumulated = "";
+
+  const wrappedStream = (async function* () {
+    for await (const chunk of result.textStream) {
+      accumulated += chunk;
+      yield chunk;
+    }
+    fullTextResolve!(accumulated);
+  })();
+
+  return {
+    stream: wrappedStream,
+    fullText: fullTextPromise,
+  };
 }
 
 /**

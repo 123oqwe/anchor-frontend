@@ -7,6 +7,7 @@ import { ThemeProvider } from "./contexts/ThemeContext";
 import AppLayout from "./components/AppLayout";
 import AdminLayout from "./components/AdminLayout";
 import CommandPalette from "./components/CommandPalette";
+import { useWebSocket } from "./hooks/useWebSocket";
 import Onboarding from "./pages/Onboarding";
 import Dashboard from "./pages/Dashboard";
 import Advisor from "./pages/Advisor";
@@ -59,14 +60,23 @@ function Router() {
   );
 }
 
+function AppInner() {
+  useWebSocket(); // Connect to server WebSocket for real-time events
+  return (
+    <>
+      <Toaster />
+      <CommandPalette />
+      <Router />
+    </>
+  );
+}
+
 function App() {
   return (
     <ErrorBoundary>
       <ThemeProvider defaultTheme="dark">
         <TooltipProvider>
-          <Toaster />
-          <CommandPalette />
-          <Router />
+          <AppInner />
         </TooltipProvider>
       </ThemeProvider>
     </ErrorBoundary>
