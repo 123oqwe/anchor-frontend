@@ -8,6 +8,7 @@ import { detectDrift } from "../cognition/twin.js";
 import { checkProactiveTriggers } from "./enforcement.js";
 import { markStaleAsDecaying } from "../graph/writer.js";
 import { runIngestion } from "../integrations/pipeline.js";
+import { captureActiveWindow, updateGraphFromActivity } from "../integrations/local/activity-monitor.js";
 
 function log(agent: string, action: string, status = "success") {
   db.prepare("INSERT INTO agent_executions (id, user_id, agent, action, status) VALUES (?,?,?,?,?)")
@@ -148,6 +149,28 @@ schedule("0 */12 * * *", () => {
   }
 });
 
+// ── Every 5 minutes — Activity Capture ──────────────────────────────────────
+schedule("*/5 * * * *", () => {
+  try {
+    captureActiveWindow();
+  } catch {}
+});
+
+// ── Every 6 hours — Update Graph from Activity ──────────────────────────────
+schedule("30 */6 * * *", () => {
+  try {
+    const result = updateGraphFromActivity();
+    if (result.updated > 0) log("Activity Monitor", `Updated ${result.updated} nodes from activity data`);
+    for (const insight of result.insights) {
+      log("Activity Monitor", insight);
+    }
+  } catch (err: any) {
+    console.error("[Cron] Activity update failed:", err.message);
+  }
+});
+
 export function startCronJobs() {
-  console.log("⏰ Cron: Digest(8am) | Decay(6h) | Twin(Mon 9am) | Tasks(10pm) | Dream(3am) | Proactive(12h)");
+  // Start first capture immediately
+  try { captureActiveWindow(); } catch {}
+  console.log("⏰ Cron: Activity(5min) | Digest(8am) | Decay(6h) | Twin(Mon 9am) | Tasks(10pm) | Dream(3am) | Proactive(3h) | GraphUpdate(6h)");
 }

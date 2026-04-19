@@ -106,6 +106,23 @@ router.post("/local/cleanup", (_req, res) => {
   res.json({ ok: true, removed });
 });
 
+// ── Activity monitoring ─────────────────────────────────────────────────────
+
+router.get("/activity/status", (_req, res) => {
+  const { getActivityStatus } = require("../integrations/local/activity-monitor.js");
+  res.json(getActivityStatus());
+});
+
+router.get("/activity/time", (req, res) => {
+  const hours = parseInt(req.query.hours as string) || 24;
+  const { getTimeByApp, getTimeByProject, getPersonActivity } = require("../integrations/local/activity-monitor.js");
+  res.json({
+    byApp: getTimeByApp(hours),
+    byProject: getTimeByProject(hours),
+    personActivity: getPersonActivity(hours),
+  });
+});
+
 const GOOGLE_SCOPES = [
   "https://www.googleapis.com/auth/gmail.readonly",
   "https://www.googleapis.com/auth/calendar.readonly",
