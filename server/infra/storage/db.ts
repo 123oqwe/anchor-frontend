@@ -372,6 +372,19 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_ingestion_user ON ingestion_log(user_id, source, started_at);
 
+  -- User-defined automations (cron jobs)
+  CREATE TABLE IF NOT EXISTS user_crons (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    cron_pattern TEXT NOT NULL,
+    action_type TEXT NOT NULL,
+    action_config TEXT NOT NULL DEFAULT '{}',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    source TEXT NOT NULL DEFAULT 'user',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
   CREATE TABLE IF NOT EXISTS scan_consent (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,

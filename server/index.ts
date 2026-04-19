@@ -32,6 +32,7 @@ import preferencesRoutes from "./routes/preferences.js";
 import integrationsRoutes from "./routes/integrations.js";
 import privacyRoutes from "./routes/privacy.js";
 import notificationsRoutes from "./routes/notifications.js";
+import cronsRoutes from "./routes/crons.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -57,6 +58,7 @@ async function startServer() {
   app.use("/api/integrations", integrationsRoutes);
   app.use("/api/privacy", privacyRoutes);
   app.use("/api/notifications", notificationsRoutes);
+  app.use("/api/crons", cronsRoutes);
 
   // ── Static / SPA ──────────────────────────────────────────────────────────
   const staticPath =
@@ -101,6 +103,9 @@ async function startServer() {
     console.log(`🚀 Anchor OS running on http://localhost:${port}/`);
     console.log(`🔌 WebSocket on ws://localhost:${port}/ws`);
   });
+
+  // Telegram bot (if token configured)
+  import("./integrations/telegram.js").then(m => m.startTelegram()).catch(() => {});
 }
 
 startServer().catch(console.error);
