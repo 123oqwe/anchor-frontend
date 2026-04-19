@@ -67,7 +67,7 @@ function fuzzyFindNode(label: string): { id: string; label: string } | null {
 
 // ── Core extraction ─────────────────────────────────────────────────────────
 
-const EXTRACTION_PROMPT = `You are Anchor's Observation Agent. Extract graph information from the user's message.
+const EXTRACTION_PROMPT = `You are Anchor's Observation Agent. Extract ONLY high-value information. Quality over quantity.
 
 EXISTING GRAPH NODES (avoid duplicates — if info is about an existing node, UPDATE it):
 {EXISTING_NODES}
@@ -78,48 +78,45 @@ EXISTING EDGES:
 USER MESSAGE:
 "{MESSAGE}"
 
-CRITICAL RULES �� FOLLOW EVERY ONE:
+WHAT TO EXTRACT (only these - nothing else):
+1. PEOPLE - Every person name or email. Always extract. "john@co.com" = person "John (Co)".
+2. GOALS - Things to ACHIEVE. Not tools you have. "Launch MVP" = yes. "VS Code" = no.
+3. PROJECTS - Active work with outcomes. "Anchor OS" = yes. "Dev Infrastructure" = no.
+4. COMMITMENTS - Promises, deadlines, obligations.
+5. RISKS - Things that could go wrong or patterns threatening goals.
+6. BEHAVIORAL PATTERNS - Observed habits, good or bad.
 
-RULE 1 — PEOPLE: Every person mentioned by name who is NOT already in the existing nodes list MUST be created as a new "person" node. No exceptions. If the message mentions "Lisa", "John", "Kevin" — each one gets a node. Do NOT skip anyone.
+DO NOT EXTRACT (skip entirely):
+- Tools, apps, software names (no "AI Dev Stack", "Mac Workstation", "Claude Code")
+- Infrastructure, platforms (no "RunPod", "Backend Tech Stack", "GPU Infrastructure")
+- Generic resources (no "Coding Environment", "Installed Software", "Dev Infrastructure")
+- The test: does this node help answer "what should I do next?" If not, skip it.
 
-RULE 2 — PREFERENCES: If the user says "I prefer X", "I hate Y", "I like Z", "I always X" — you MUST create a new "preference" node. Do NOT fold this into an update of an existing node. Preferences are ALWAYS new nodes.
+RULES:
+- Labels max 40 chars
+- Max 6 new_nodes, 3 updates, 8 edges
+- Detail under 60 chars
+- Prefer PEOPLE over resources. Always extract people.
+- When in doubt, SKIP (not create). Quality over quantity.
 
-RULE 3 — CONSTRAINTS: Deadlines, limits, blockers, budget caps — each one MUST be a new "constraint" or "commitment" node.
-
-RULE 4 — OPPORTUNITIES: If someone offers help, makes an intro, or suggests something beneficial — create an "opportunity" node.
-
-RULE 5 — DUPLICATES: Only skip a node if the EXACT person/concept already exists in the existing list. "Lisa" does NOT match "Sarah". When in doubt, CREATE the node.
-
-RULE 6 — LABELS: Short, ≤40 characters. "Kevin (a16z)" not "Kevin from Andreessen Horowitz who I met at dinner".
-
-RULE 7 — UPDATES: For existing nodes, use the EXACT label from the existing list. Only update status or detail, never change the label.
-
-RULE 8 — EDGES: For every meaningful relationship between two nodes, create an edge. Never create self-referencing edges (from == to). Aim for at least 1 edge per new node.
-
-RULE 9 — BIAS: When in doubt, CREATE the node. It is better to have a node you don't need than to miss information. Err on the side of extraction, not omission.
-
-RULE 10 — OUTPUT LIMIT: Max 8 new_nodes, 5 updates, 10 edges.
-
-RULE 11 — COMPACT JSON: Keep "detail" under 60 characters. No long sentences. The shorter your JSON, the less likely it gets truncated.
-
-Node types: identity, goal, project, commitment, task, person, relationship, value, constraint, preference, routine, state, risk, opportunity, decision, resource, artifact, observation, outcome, behavioral_pattern, external_context
-Edge types: depends_on, blocks, aligns_with, conflicts_with, owned_by, temporal, causal, contextual, supports, threatens
+Node types: goal, project, commitment, task, person, value, constraint, preference, risk, opportunity, decision, behavioral_pattern
+Edge types: depends_on, blocks, aligns_with, conflicts_with, supports, threatens, contextual
 Domains: work, relationships, finance, health, growth
 
-Respond ONLY with valid JSON (no markdown):
+Respond ONLY with valid JSON:
 {
   "new_nodes": [
-    { "domain": "work", "label": "Short Name", "type": "person", "status": "active", "detail": "One sentence context" }
+    { "domain": "relationships", "label": "Sarah Chen", "type": "person", "status": "active", "detail": "Investor from Sequoia" }
   ],
   "updates": [
-    { "label": "Exact Existing Label", "new_status": "in-progress", "new_detail": "optional updated detail" }
+    { "label": "Exact Existing Label", "new_status": "in-progress", "new_detail": "updated detail" }
   ],
   "new_edges": [
-    { "from_label": "Node A", "to_label": "Node B", "type": "depends_on" }
+    { "from_label": "Node A", "to_label": "Node B", "type": "supports" }
   ]
 }
 
-If nothing to extract, return: { "new_nodes": [], "updates": [], "new_edges": [] }`;
+If nothing high-value to extract: { "new_nodes": [], "updates": [], "new_edges": [] }`;
 
 async function doExtraction(combinedMessage: string): Promise<void> {
   try {

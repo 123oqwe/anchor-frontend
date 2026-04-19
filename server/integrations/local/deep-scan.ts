@@ -206,17 +206,21 @@ export function deepScanMac(): MacProfile {
 export function profileToText(profile: MacProfile): string {
   const sections: string[] = [];
 
-  // Apps by category
+  // Infer INTERESTS and ACTIVITIES from apps — not the apps themselves
   const appsByCategory = new Map<string, string[]>();
   for (const app of profile.apps) {
     if (!appsByCategory.has(app.category)) appsByCategory.set(app.category, []);
     appsByCategory.get(app.category)!.push(app.name);
   }
   if (appsByCategory.size > 0) {
-    sections.push("INSTALLED SOFTWARE:");
-    appsByCategory.forEach((apps, category) => {
-      sections.push(`  ${category}: ${apps.join(", ")}`);
-    });
+    sections.push("USER INTERESTS AND ACTIVITIES (inferred from installed apps):");
+    if (appsByCategory.has("music")) sections.push("  This person is actively involved in DJ/music production");
+    if (appsByCategory.has("coding") && (appsByCategory.get("coding")?.length ?? 0) >= 3) sections.push("  This person is a serious developer/programmer");
+    if (appsByCategory.has("ai") && (appsByCategory.get("ai")?.length ?? 0) >= 2) sections.push("  This person works heavily with AI tools");
+    if (appsByCategory.has("social")) sections.push(`  Social apps: ${appsByCategory.get("social")!.join(", ")} — extract any people if possible`);
+    if (appsByCategory.has("finance")) sections.push("  Has finance/spreadsheet tools installed");
+    if (appsByCategory.has("entertainment")) sections.push(`  Entertainment: ${appsByCategory.get("entertainment")!.join(", ")}`);
+    sections.push("  NOTE: Do NOT create nodes for the apps themselves. Only create nodes for goals, projects, people, and patterns.");
   }
 
   // Git projects
