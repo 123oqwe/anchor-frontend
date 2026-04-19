@@ -123,6 +123,45 @@ router.get("/nodes/:id", (req, res) => {
   res.json({ node, edges: { outgoing, incoming }, health, importance, relatedMemories: memories });
 });
 
+// ── Tasks related to this node ──────────────────────────────────────────────
+
+router.get("/nodes/:id/tasks", (req, res) => {
+  const node = db.prepare("SELECT label FROM graph_nodes WHERE id=? AND user_id=?").get(req.params.id, DEFAULT_USER_ID) as any;
+  if (!node) return res.status(404).json({ error: "Node not found" });
+
+  // Find tasks whose title contains any word from node label (min 3 chars)
+  const keywords = node.label.split(/[\s\/\-\(\)]+/).filter((w: string) => w.length >= 3);
+  const tasks: any[] = [];
+  for (const kw of keywords.slice(0, 3)) {
+    const found = db.prepare(
+      "SELECT t.id, t.title, t.status, t.priority, p.name as projectName FROM tasks t JOIN projects p ON t.project_id=p.id WHERE p.user_id=? AND t.title LIKE ? LIMIT 5"
+    ).all(DEFAULT_USER_ID, `%${kw}%`) as any[];
+    for (const t of found) {
+      if (!tasks.find(x => x.id === t.id)) tasks.push(t);
+    }
+  }
+
+  res.json(tasks);
+});
+
+// ── Ask Advisor about this specific node ────────────────────────────────────
+
+router.post("/nodes/:id/ask", async (req, res) => {
+  const node = db.prepare("SELECT label, type, domain, detail, status FROM graph_nodes WHERE id=? AND user_id=?").get(req.params.id, DEFAULT_USER_ID) as any;
+  if (!node) return res.status(404).json({ error: "Node not found" });
+
+  const { message } = req.body;
+  const contextMsg = `[Context: the user is looking at their ${node.type} "${node.label}" (${node.domain}, ${node.status}). Detail: ${node.detail ?? "none"}]\n\n${message ?? "What should I do next with this?"}`;
+
+  try {
+    const { decide } = require("../cognition/decision.js");
+    const result = await decide(contextMsg, []);
+    res.json({ content: result.raw, structured: result.structured });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 router.put("/nodes/:id", (req, res) => {
   const { label, type, status, captured, detail } = req.body;
   db.prepare("UPDATE graph_nodes SET label=?, type=?, status=?, captured=?, detail=?, updated_at=datetime('now') WHERE id=? AND user_id=?")

@@ -53,8 +53,10 @@ function extractPeopleFromBrowser(): ExtractedPerson[] {
 
       for (const r of linkedin) {
         const name = r.title.replace(" | LinkedIn", "").replace(/^\(\d+\)\s*/, "").trim();
-        const SKIP_NAMES = new Set(["search", "feed", "grow", "linkedin", "login", "security", "notifications", "jobs", "messaging", "home", "premium"]);
-        if (name && name.length > 2 && name.length < 40 && !seen.has(name.toLowerCase()) && !SKIP_NAMES.has(name.toLowerCase())) {
+        const SKIP_NAMES = new Set(["search", "feed", "grow", "linkedin", "login", "security", "notifications", "jobs", "messaging", "home", "premium", "post", "activity", "featured", "education", "experience", "skills", "interests", "projects", "publications", "courses", "licenses", "certifications", "volunteer", "recommendations"]);
+        // Also skip "Activity | Name", "Featured | Name", "Education | Name" patterns
+        const isPageArtifact = name.includes(" | ") || name.startsWith("Post ") || name.startsWith("Activity ") || name.startsWith("Featured ") || name.startsWith("Education ");
+        if (name && name.length > 2 && name.length < 40 && !seen.has(name.toLowerCase()) && !SKIP_NAMES.has(name.toLowerCase()) && !isPageArtifact) {
           seen.add(name.toLowerCase());
           people.push({ name, source: "linkedin", detail: "LinkedIn connection", domain: "relationships" });
         }
@@ -181,39 +183,11 @@ function categorizeRelationship(source: string, name: string): { category: strin
   }
 }
 
-// ── Auto-infer edges between people and goals/projects ──────────────────────
-
-function inferEdges(personId: string, person: ExtractedPerson): void {
-  // Connect LinkedIn contacts to work goals
-  if (person.source === "linkedin") {
-    const workGoals = db.prepare(
-      "SELECT id, label FROM graph_nodes WHERE user_id=? AND domain='work' AND type IN ('goal','project') LIMIT 3"
-    ).all(DEFAULT_USER_ID) as any[];
-
-    for (const goal of workGoals) {
-      const edgeExists = db.prepare(
-        "SELECT id FROM graph_edges WHERE user_id=? AND from_node_id=? AND to_node_id=?"
-      ).get(DEFAULT_USER_ID, personId, goal.id);
-
-      if (!edgeExists) {
-        db.prepare("INSERT INTO graph_edges (id, user_id, from_node_id, to_node_id, type, weight) VALUES (?,?,?,?,?,?)")
-          .run(nanoid(), DEFAULT_USER_ID, personId, goal.id, "contextual", 0.3);
-      }
-    }
-  }
-
-  // Connect WeChat contacts to growth/personal domain
-  if (person.source === "wechat") {
-    const growthNodes = db.prepare(
-      "SELECT id FROM graph_nodes WHERE user_id=? AND domain='growth' AND type IN ('goal','value') LIMIT 1"
-    ).all(DEFAULT_USER_ID) as any[];
-
-    for (const node of growthNodes) {
-      db.prepare("INSERT INTO graph_edges (id, user_id, from_node_id, to_node_id, type, weight) VALUES (?,?,?,?,?,?)")
-        .run(nanoid(), DEFAULT_USER_ID, personId, (node as any).id, "contextual", 0.2);
-    }
-  }
-}
+// ── NO auto-infer edges ─────────────────────────────────────────────────────
+// Removed: blind connection of ALL people to ALL work goals was creating
+// 180+ junk edges. Edges should only be created when there's EVIDENCE
+// (same meeting, same email thread, user manually connects).
+// People sit in the graph as standalone nodes until real evidence connects them.
 
 // ── Write people directly to graph (no LLM needed) ──────────────────────────
 
@@ -248,8 +222,7 @@ export function extractAndSavePeople(): { total: number; sources: Record<string,
       "INSERT INTO graph_nodes (id, user_id, domain, label, type, status, captured, detail) VALUES (?,?,?,?,?,?,?,?)"
     ).run(personId, DEFAULT_USER_ID, person.domain, person.name, "person", "active", `Extracted from ${person.source}`, detail);
 
-    // Auto-infer edges
-    inferEdges(personId, person);
+
 
     saved++;
   }
