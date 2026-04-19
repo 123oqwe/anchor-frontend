@@ -46,16 +46,25 @@ export default function NodeDetail() {
   const [askInput, setAskInput] = useState("");
   const [askResult, setAskResult] = useState<string | null>(null);
   const [asking, setAsking] = useState(false);
+  const [skills, setSkills] = useState<any[]>([]);
+  const [executions, setExecutions] = useState<any[]>([]);
+  const [executing, setExecuting] = useState(false);
 
   useEffect(() => {
     if (!nodeId) return;
     Promise.all([
       api.getNodeDetail(nodeId),
       fetch(`/api/graph/nodes/${nodeId}/tasks`).then(r => r.ok ? r.json() : []).catch(() => []),
-    ]).then(([d, t]) => {
+      fetch("/api/skills").then(r => r.ok ? r.json() : []).catch(() => []),
+      fetch("/api/agents/executions").then(r => r.ok ? r.json() : []).catch(() => []),
+    ]).then(([d, t, sk, ex]) => {
       setData(d);
       setNote(d.node?.detail ?? "");
       setTasks(t);
+      setSkills(sk);
+      // Filter executions related to this node
+      const nodeLabel = d.node?.label ?? "";
+      setExecutions(ex.filter((e: any) => e.action?.toLowerCase().includes(nodeLabel.split(" ")[0]?.toLowerCase())).slice(0, 5));
     }).catch(() => {})
     .finally(() => setLoading(false));
   }, [nodeId]);
@@ -233,6 +242,97 @@ export default function NodeDetail() {
                 </div>
                 <p className="text-xs text-muted-foreground leading-relaxed whitespace-pre-line">{askResult}</p>
               </motion.div>
+            )}
+          </div>
+        </motion.div>
+
+        {/* ── Skills ──────────────────────────────────── */}
+        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.3 }} className="mb-6">
+          <h2 className="text-xs text-muted-foreground/60 tracking-widest uppercase mb-3">Skills</h2>
+          <div className="glass rounded-xl p-4">
+            {skills.length > 0 ? (
+              <div className="space-y-2">
+                {skills.map((sk: any) => (
+                  <div key={sk.id} className="flex items-center gap-2 text-xs">
+                    <span className="text-primary">⚡</span>
+                    <span className="text-foreground flex-1">{sk.name}</span>
+                    <span className="text-[10px] text-muted-foreground/40">used {sk.use_count}x</span>
+                    <button onClick={async () => {
+                      setExecuting(true);
+                      toast.success(`Running skill: ${sk.name}...`);
+                      try {
+                        await fetch(`/api/graph/nodes/${nodeId}/ask`, {
+                          method: "POST", headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ message: `Execute skill "${sk.name}" for "${node.label}": ${sk.steps?.join(", ") ?? sk.description}` }),
+                        });
+                        toast.success("Skill executed");
+                      } catch { toast.error("Failed"); }
+                      setExecuting(false);
+                    }} className="px-2 py-0.5 rounded bg-primary/10 text-primary text-[10px] hover:bg-primary/20">
+                      Run
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="text-center py-2">
+                <p className="text-xs text-muted-foreground/40 mb-2">No skills yet — they auto-generate from repeated patterns</p>
+                <p className="text-[10px] text-muted-foreground/30">Confirm 3+ similar plans → skill crystallizes automatically</p>
+              </div>
+            )}
+          </div>
+        </motion.div>
+
+        {/* ── Agent Execution ────────────────────────────── */}
+        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.35 }} className="mb-6">
+          <h2 className="text-xs text-muted-foreground/60 tracking-widest uppercase mb-3">Agent Tools</h2>
+          <div className="glass rounded-xl p-4">
+            <div className="grid grid-cols-2 gap-2 mb-3">
+              {[
+                { name: "Send Email", tool: "send_email", icon: "📧", desc: "via Mail.app" },
+                { name: "Calendar Event", tool: "create_calendar", icon: "📅", desc: "via Calendar.app" },
+                { name: "Set Reminder", tool: "create_reminder", icon: "🔔", desc: "via Reminders" },
+                { name: "Web Search", tool: "web_search", icon: "🔍", desc: "DuckDuckGo" },
+                { name: "Open URL", tool: "open_url", icon: "🌐", desc: "default browser" },
+                { name: "Run Code", tool: "run_code", icon: "💻", desc: "sandboxed JS" },
+              ].map(t => (
+                <button key={t.tool} onClick={async () => {
+                  const input = window.prompt(`${t.name} — enter details:`);
+                  if (!input) return;
+                  setExecuting(true);
+                  toast.success(`Running ${t.name}...`);
+                  try {
+                    await fetch(`/api/graph/nodes/${nodeId}/ask`, {
+                      method: "POST", headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ message: `Use the ${t.tool} tool for "${node.label}": ${input}` }),
+                    });
+                    toast.success(`${t.name} complete`);
+                  } catch { toast.error("Failed"); }
+                  setExecuting(false);
+                }}
+                  disabled={executing}
+                  className="flex items-center gap-2 glass rounded-lg px-3 py-2 text-xs hover:bg-white/[0.03] disabled:opacity-50">
+                  <span>{t.icon}</span>
+                  <div className="text-left">
+                    <div className="text-foreground">{t.name}</div>
+                    <div className="text-[9px] text-muted-foreground/40">{t.desc}</div>
+                  </div>
+                </button>
+              ))}
+            </div>
+
+            {/* Recent executions for this node */}
+            {executions.length > 0 && (
+              <div className="border-t border-white/5 pt-2 mt-2">
+                <p className="text-[10px] text-muted-foreground/40 mb-1.5">Recent Activity</p>
+                {executions.map((ex: any) => (
+                  <div key={ex.id} className="flex items-center gap-2 text-[10px] text-muted-foreground py-0.5">
+                    <span className={ex.status === "success" ? "text-emerald-400" : "text-red-400"}>●</span>
+                    <span className="truncate flex-1">{ex.action?.slice(0, 60)}</span>
+                    <span className="text-muted-foreground/30">{ex.agent}</span>
+                  </div>
+                ))}
+              </div>
             )}
           </div>
         </motion.div>
