@@ -147,6 +147,164 @@ function ActivityMonitorStatus() {
   );
 }
 
+/** Custom Agents — create, install templates, run */
+function CustomAgentsList() {
+  const [agents, setAgents] = useState<any[]>([]);
+  const [templates, setTemplates] = useState<any[]>([]);
+  const [showCreate, setShowCreate] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [newInstructions, setNewInstructions] = useState("");
+  const [runningId, setRunningId] = useState<string | null>(null);
+  const [runInput, setRunInput] = useState("");
+  const [runResult, setRunResult] = useState<string | null>(null);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editInstructions, setEditInstructions] = useState("");
+
+  useEffect(() => {
+    api.getCustomAgents().then(setAgents).catch(() => {});
+    api.getAgentTemplates().then(d => Array.isArray(d) ? setTemplates(d) : null).catch(() => {});
+  }, []);
+
+  const installedNames = new Set(agents.map((a: any) => a.name));
+
+  const handleCreate = async () => {
+    if (!newName.trim() || !newInstructions.trim()) return;
+    await api.createCustomAgent({ name: newName, instructions: newInstructions, tools: [] });
+    setNewName(""); setNewInstructions(""); setShowCreate(false);
+    setAgents(await api.getCustomAgents());
+    toast.success("Agent created");
+  };
+
+  const handleRun = async (id: string) => {
+    if (!runInput.trim()) return;
+    setRunResult(null);
+    try {
+      const res = await api.runCustomAgent(id, runInput);
+      setRunResult(res.content);
+      setRunInput("");
+    } catch { toast.error("Agent execution failed"); }
+  };
+
+  const handleSaveEdit = async (id: string) => {
+    await api.updateCustomAgent(id, { name: editName, instructions: editInstructions, tools: [] });
+    setEditing(null);
+    setAgents(await api.getCustomAgents());
+    toast.success("Agent updated");
+  };
+
+  return (
+    <div className="space-y-3">
+      {/* Existing agents */}
+      {agents.map((a: any) => (
+        <div key={a.id} className="glass rounded-lg p-3">
+          {editing === a.id ? (
+            <div className="space-y-2">
+              <input value={editName} onChange={e => setEditName(e.target.value)}
+                className="w-full glass rounded-lg px-3 py-1.5 text-xs text-foreground focus:outline-none" />
+              <textarea value={editInstructions} onChange={e => setEditInstructions(e.target.value)} rows={3}
+                className="w-full glass rounded-lg px-3 py-1.5 text-xs text-foreground focus:outline-none resize-none" />
+              <div className="flex gap-2">
+                <button onClick={() => handleSaveEdit(a.id)} className="px-2 py-1 rounded bg-primary/10 text-primary text-[10px]">Save</button>
+                <button onClick={() => setEditing(null)} className="px-2 py-1 rounded text-muted-foreground text-[10px]">Cancel</button>
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="flex items-center gap-2 mb-1">
+                <span className="text-primary">🤖</span>
+                <span className="text-xs font-medium text-foreground flex-1">{a.name}</span>
+                <button onClick={() => { setEditing(a.id); setEditName(a.name); setEditInstructions(a.instructions); }}
+                  className="text-[10px] text-muted-foreground hover:text-foreground">Edit</button>
+                <button onClick={async () => {
+                  await api.deleteCustomAgent(a.id);
+                  setAgents(agents.filter(x => x.id !== a.id));
+                  toast.success("Agent deleted");
+                }} className="text-[10px] text-red-400">Delete</button>
+              </div>
+              <p className="text-[10px] text-muted-foreground mb-2 line-clamp-2">{a.instructions}</p>
+
+              {/* Run agent */}
+              {runningId === a.id ? (
+                <div className="space-y-2">
+                  <div className="flex gap-2">
+                    <input value={runInput} onChange={e => setRunInput(e.target.value)}
+                      onKeyDown={e => e.key === "Enter" && handleRun(a.id)}
+                      placeholder="Ask this agent something..."
+                      autoFocus
+                      className="flex-1 glass rounded-lg px-3 py-1.5 text-xs text-foreground focus:outline-none" />
+                    <button onClick={() => handleRun(a.id)} className="px-2 py-1.5 rounded-lg bg-primary text-primary-foreground text-[10px]">Run</button>
+                    <button onClick={() => { setRunningId(null); setRunResult(null); }} className="text-[10px] text-muted-foreground">×</button>
+                  </div>
+                  {runResult && (
+                    <div className="p-2 bg-primary/5 rounded-lg">
+                      <p className="text-xs text-muted-foreground whitespace-pre-line">{runResult}</p>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <button onClick={() => setRunningId(a.id)}
+                  className="px-2 py-1 rounded bg-primary/10 text-primary text-[10px]">Run Agent</button>
+              )}
+            </>
+          )}
+        </div>
+      ))}
+
+      {agents.length === 0 && !showCreate && (
+        <p className="text-xs text-muted-foreground/40">No custom agents yet. Create one or install a template below.</p>
+      )}
+
+      {/* Create new agent */}
+      {showCreate ? (
+        <div className="glass rounded-lg p-3 space-y-2 border border-primary/20">
+          <input value={newName} onChange={e => setNewName(e.target.value)}
+            placeholder="Agent name (e.g. Competitor Analyst)"
+            className="w-full glass rounded-lg px-3 py-1.5 text-xs text-foreground focus:outline-none" />
+          <textarea value={newInstructions} onChange={e => setNewInstructions(e.target.value)}
+            placeholder="Instructions — tell this agent who it is and what it does..."
+            rows={4}
+            className="w-full glass rounded-lg px-3 py-1.5 text-xs text-foreground focus:outline-none resize-none" />
+          <div className="flex gap-2">
+            <button onClick={handleCreate} className="px-3 py-1.5 rounded-lg bg-primary text-primary-foreground text-xs">Create</button>
+            <button onClick={() => setShowCreate(false)} className="px-3 py-1.5 rounded-lg text-muted-foreground text-xs">Cancel</button>
+          </div>
+        </div>
+      ) : (
+        <button onClick={() => setShowCreate(true)}
+          className="w-full glass rounded-lg px-3 py-2 text-xs text-primary hover:bg-primary/5 transition-colors text-left">
+          + Create Custom Agent
+        </button>
+      )}
+
+      {/* Templates */}
+      {templates.length > 0 && (
+        <div className="pt-2 border-t border-white/5 mt-3">
+          <p className="text-[10px] text-muted-foreground/40 mb-2">Agent Templates</p>
+          {templates.map((t: any, i: number) => (
+            <div key={t.name} className="flex items-center gap-2 py-1.5">
+              <span className="text-primary text-xs">🤖</span>
+              <div className="flex-1">
+                <span className="text-xs text-foreground">{t.name}</span>
+                <p className="text-[9px] text-muted-foreground truncate">{t.instructions?.slice(0, 60)}</p>
+              </div>
+              {installedNames.has(t.name) ? (
+                <span className="text-[10px] text-emerald-400">Installed</span>
+              ) : (
+                <button onClick={async () => {
+                  await api.installAgentTemplate(i);
+                  setAgents(await api.getCustomAgents());
+                  toast.success(`${t.name} installed`);
+                }} className="px-2 py-0.5 rounded bg-primary/10 text-primary text-[10px]">Install</button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function Settings() {
   const [activeSection, setActiveSection] = useState("profile");
   const [loading, setLoading] = useState(true);
@@ -451,6 +609,13 @@ export default function Settings() {
                   <h2 className="text-lg font-semibold mb-2">Automations</h2>
                   <p className="text-xs text-muted-foreground mb-4">Scheduled tasks that run automatically.</p>
                   <AutomationsList />
+                </div>
+
+                {/* Custom Agents */}
+                <div className="glass rounded-xl p-6">
+                  <h2 className="text-lg font-semibold mb-2">Custom Agents</h2>
+                  <p className="text-xs text-muted-foreground mb-4">Create specialized AI agents with custom instructions. Each agent is a persona overlay on the Decision Agent.</p>
+                  <CustomAgentsList />
                 </div>
 
                 {/* Skill Templates */}

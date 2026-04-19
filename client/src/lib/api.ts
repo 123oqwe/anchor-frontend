@@ -137,6 +137,15 @@ export const api = {
   setOverride: (task: string, modelId: string) => req("PUT", `/api/admin/overrides/${task}`, { modelId }),
   clearOverride: (task: string) => req("DELETE", `/api/admin/overrides/${task}`),
 
+  // Custom Agents
+  getCustomAgents: () => req<any[]>("GET", "/api/agents/custom"),
+  getAgentTemplates: () => req<any[]>("GET", "/api/agents/custom/templates"),
+  createCustomAgent: (data: any) => req<any>("POST", "/api/agents/custom", data),
+  updateCustomAgent: (id: string, data: any) => req("PUT", `/api/agents/custom/${id}`, data),
+  deleteCustomAgent: (id: string) => req("DELETE", `/api/agents/custom/${id}`),
+  installAgentTemplate: (templateIndex: number) => req<any>("POST", "/api/agents/custom/install-template", { templateIndex }),
+  runCustomAgent: (id: string, message: string) => req<any>("POST", `/api/agents/custom/${id}/run`, { message }),
+
   // Integrations — Google OAuth
   getIntegrationStatus: () => req<any>("GET", "/api/integrations/status"),
   getGoogleConnectUrl: () => req<any>("GET", "/api/integrations/google/connect"),
