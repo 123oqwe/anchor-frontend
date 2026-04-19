@@ -33,6 +33,9 @@ import integrationsRoutes from "./routes/integrations.js";
 import privacyRoutes from "./routes/privacy.js";
 import notificationsRoutes from "./routes/notifications.js";
 import cronsRoutes from "./routes/crons.js";
+import customAgentsRoutes from "./routes/custom-agents.js";
+import mcpRoutes from "./routes/mcp.js";
+import imessageRoutes from "./integrations/imessage.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -59,6 +62,9 @@ async function startServer() {
   app.use("/api/privacy", privacyRoutes);
   app.use("/api/notifications", notificationsRoutes);
   app.use("/api/crons", cronsRoutes);
+  app.use("/api/agents", customAgentsRoutes);
+  app.use("/api/mcp", mcpRoutes);
+  app.use("/api/channels/imessage", imessageRoutes);
 
   // ── Static / SPA ──────────────────────────────────────────────────────────
   const staticPath =

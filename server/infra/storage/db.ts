@@ -385,6 +385,33 @@ db.exec(`
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
+  -- Custom user-defined agents
+  CREATE TABLE IF NOT EXISTS user_agents (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    instructions TEXT NOT NULL,
+    tools TEXT NOT NULL DEFAULT '[]',
+    trigger_type TEXT NOT NULL DEFAULT 'manual',
+    trigger_config TEXT NOT NULL DEFAULT '{}',
+    model_preference TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  -- External MCP server connections
+  CREATE TABLE IF NOT EXISTS mcp_servers (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    url TEXT NOT NULL,
+    transport TEXT NOT NULL DEFAULT 'streamable-http',
+    status TEXT NOT NULL DEFAULT 'disconnected',
+    tools_json TEXT NOT NULL DEFAULT '[]',
+    last_connected TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
   CREATE TABLE IF NOT EXISTS scan_consent (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
