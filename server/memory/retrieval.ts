@@ -179,6 +179,50 @@ export function serializeTwinForPrompt(): string {
 
 // ── Write operations ────────────────────────────────────────────────────────
 
+/**
+ * Memory relevance filter (Mem0-inspired).
+ * Decides if content is worth persisting. Prevents memory bloat.
+ * Returns adjusted confidence, or null if not worth storing.
+ */
+function assessRelevance(opts: { title: string; content: string; tags: string[]; type: MemoryClass }): number | null {
+  const text = `${opts.title} ${opts.content}`.toLowerCase();
+
+  // Skip pure greetings/acknowledgments
+  if (text.length < 20 && /^(hi|hello|hey|thanks|ok|sure|got it|cool|nice|great|yes|no)\b/.test(text)) {
+    return null;
+  }
+
+  // Skip near-duplicates (same title in last 24h)
+  const recent = db.prepare(
+    "SELECT id FROM memories WHERE user_id=? AND title=? AND created_at >= datetime('now', '-24 hours')"
+  ).get(DEFAULT_USER_ID, opts.title) as any;
+  if (recent) return null;
+
+  // Boost: mentions graph nodes
+  const nodeLabels = db.prepare(
+    "SELECT label FROM graph_nodes WHERE user_id=? LIMIT 50"
+  ).all(DEFAULT_USER_ID) as any[];
+  const mentionsNode = nodeLabels.some((n: any) => {
+    const name = n.label.split(/[\s(]/)[0].toLowerCase();
+    return name.length >= 3 && text.includes(name);
+  });
+
+  // Boost: decision-related content
+  const isDecision = /\b(should|decide|prioritize|choice|trade-?off|risk|deadline|urgent|important)\b/.test(text);
+
+  // Boost: has meaningful tags
+  const hasTags = opts.tags.length > 0 && !opts.tags.every(t => t === "general");
+
+  // Calculate adjusted confidence
+  let confidence = 0.7; // base
+  if (mentionsNode) confidence += 0.15;
+  if (isDecision) confidence += 0.1;
+  if (hasTags) confidence += 0.05;
+  if (opts.type === "semantic") confidence = Math.max(confidence, 0.85); // semantic always high
+
+  return Math.min(1.0, confidence);
+}
+
 export function writeMemory(opts: {
   type: MemoryClass;
   title: string;
@@ -187,10 +231,16 @@ export function writeMemory(opts: {
   source: string;
   confidence: number;
 }): string {
+  // Mem0-inspired relevance check — skip low-value content
+  const adjustedConfidence = assessRelevance(opts);
+  if (adjustedConfidence === null) {
+    return ""; // not worth storing
+  }
+
   const id = nanoid();
   db.prepare(
     "INSERT INTO memories (id, user_id, type, title, content, tags, source, confidence) VALUES (?,?,?,?,?,?,?,?)"
-  ).run(id, DEFAULT_USER_ID, opts.type, opts.title, opts.content, JSON.stringify(opts.tags), opts.source, opts.confidence);
+  ).run(id, DEFAULT_USER_ID, opts.type, opts.title, opts.content, JSON.stringify(opts.tags), opts.source, adjustedConfidence);
   return id;
 }
 
