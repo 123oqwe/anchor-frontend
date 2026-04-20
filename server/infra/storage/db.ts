@@ -530,6 +530,21 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_provider_attempts_run ON provider_attempts(run_id);
   CREATE INDEX IF NOT EXISTS idx_provider_attempts_provider ON provider_attempts(provider_id, created_at);
+
+  -- Codex-style App Approval: per-app authorization layered on top of L6 ActionClass.
+  -- A vision/automation provider targeting a new app is blocked until user grants it.
+  CREATE TABLE IF NOT EXISTS app_approvals (
+    user_id TEXT NOT NULL,
+    app_identifier TEXT NOT NULL,            -- "gmail.com" / "com.apple.Mail" / "*"
+    scope TEXT NOT NULL DEFAULT 'full',      -- "read" | "write" | "full"
+    status TEXT NOT NULL DEFAULT 'pending',  -- "pending" | "approved" | "denied"
+    granted_at TEXT,
+    expires_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, app_identifier, scope)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_app_approvals_status ON app_approvals(user_id, status);
 `);
 
 // ─── Default user seed ────────────────────────────────────────────────────────

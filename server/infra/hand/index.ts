@@ -99,6 +99,30 @@ function registerBridgeTools(): void {
     },
   });
 
+  // ── Desktop automate (Codex/Doubao-style Tier 3 GUI fallback) ─────────────
+  registerTool({
+    name: "desktop_automate",
+    description: "Automate any desktop app by screenshot + vision model + click/type. Tier 3 fallback — use when no API or script exists. Requires Accessibility permission on macOS.",
+    handler: "browser",
+    actionClass: "browser_action",
+    inputSchema: {
+      type: "object",
+      properties: {
+        task: { type: "string", description: "Natural-language instruction (e.g. 'In Slack, click first DM from Foo')" },
+        app: { type: "string", description: "Optional app name to activate first (e.g. 'Slack')" },
+      },
+      required: ["task"],
+    },
+    execute: async (input, ctx): Promise<ToolResult> => {
+      const { dispatchCapability } = await import("../../bridges/registry.js");
+      const r = await dispatchCapability("desktop.automate", input, ctx);
+      return {
+        success: r.success, output: r.output, error: r.error,
+        data: { ...(r.data ?? {}), providerId: r.providerId },
+      };
+    },
+  });
+
   // ── Dev delegate ──────────────────────────────────────────────────────────
   registerTool({
     name: "delegate_to_claude_code",

@@ -10,6 +10,7 @@ import type { ExecutionContext } from "../execution/registry.js";
 import type { CapabilityDef, ProviderDef, Platform, ProviderResult, ProviderKind } from "./types.js";
 import { cachedHealthCheck } from "./health.js";
 import { logProviderAttempt, acquireProviderRateLimit } from "./telemetry.js";
+import { checkAppApproval } from "./app-approval.js";
 
 const capabilities = new Map<string, CapabilityDef>();
 const providers = new Map<string, ProviderDef>();            // id → provider
@@ -94,23 +95,30 @@ export function setProviderDisabled(capabilityName: string, providerIds: string[
 
 // ── Dispatch ─────────────────────────────────────────────────────────────────
 
+/** Default order for Codex-style Action Hierarchy: structured API > script > vision. */
+const KIND_PRIORITY: Record<string, number> = { cli: 0, mcp: 1, vision: 2 };
+
 function orderProviders(
   compatible: ProviderDef[],
   userPref: string[],
   disabled: Set<string>
 ): ProviderDef[] {
   const active = compatible.filter(p => !disabled.has(p.id));
-  // user pref first, then the rest in registration order
   const byId = new Map(active.map(p => [p.id, p]));
   const ordered: ProviderDef[] = [];
   const seen = new Set<string>();
+
+  // User preference wins (explicit overrides hierarchy)
   for (const id of userPref) {
     const p = byId.get(id);
     if (p && !seen.has(id)) { ordered.push(p); seen.add(id); }
   }
-  for (const p of active) {
-    if (!seen.has(p.id)) ordered.push(p);
-  }
+
+  // Remaining providers: Action Hierarchy — CLI (tier 1) → MCP (tier 2) → Vision (tier 3 fallback)
+  const rest = active.filter(p => !seen.has(p.id));
+  rest.sort((a, b) => (KIND_PRIORITY[a.kind] ?? 99) - (KIND_PRIORITY[b.kind] ?? 99));
+  ordered.push(...rest);
+
   return ordered;
 }
 
@@ -197,6 +205,20 @@ export async function dispatchCapability<I = any, O = any>(
       });
       attemptLog.push(`${provider.id}: skipped (${reason})`);
       continue;
+    }
+
+    // Codex-style App Approval (layered over L6)
+    if (provider.targetApp && provider.targetApp !== "*") {
+      const appGate = checkAppApproval(provider.targetApp);
+      if (appGate.decision !== "allow") {
+        logProviderAttempt({
+          capability: capabilityName, providerId: provider.id,
+          status: "skipped", reason: `app-approval: ${appGate.decision} (${(appGate as any).reason})`,
+          latencyMs: Date.now() - healthStart, runId: ctx?.runId,
+        });
+        attemptLog.push(`${provider.id}: ${appGate.decision} — ${(appGate as any).reason}`);
+        continue;
+      }
     }
 
     // Rate limit

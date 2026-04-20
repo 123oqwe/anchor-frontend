@@ -23,6 +23,25 @@ export const emailSend: CapabilityDef = {
   },
 };
 
+export const calendarCreateEvent: CapabilityDef = {
+  name: "calendar.create_event",
+  description: "Create a calendar event. Dispatches to Google Calendar REST or Apple Calendar via Shortcuts.",
+  actionClass: "modify_calendar",
+  inputSchema: {
+    type: "object",
+    properties: {
+      title: { type: "string" },
+      date: { type: "string", description: "YYYY-MM-DD" },
+      time: { type: "string", description: "HH:MM 24h (default 09:00)" },
+      durationMinutes: { type: "number", description: "default 60" },
+      description: { type: "string" },
+      location: { type: "string" },
+      attendees: { type: "array", items: { type: "string" } },
+    },
+    required: ["title", "date"],
+  },
+};
+
 export const browserNavigate: CapabilityDef = {
   name: "browser.navigate",
   description: "Navigate to a URL and extract text (stateless, CLI-optimized).",
@@ -75,9 +94,26 @@ export const devDelegate: CapabilityDef = {
   },
 };
 
+export const desktopAutomate: CapabilityDef = {
+  name: "desktop.automate",
+  description: "Automate any desktop app via vision: screenshot → VLM decides action → OS executes click/type. Tier 3 fallback when no API or script exists.",
+  actionClass: "browser_action",   // reusing — Desktop automation is a privileged action; extend L6 later
+  inputSchema: {
+    type: "object",
+    properties: {
+      task: { type: "string", description: "Natural language instruction (e.g. 'Open Slack and click the first DM from Foo')" },
+      app: { type: "string", description: "Optional: app name to activate first (e.g. 'Slack', 'Mail')" },
+      confirmBeforeClick: { type: "boolean", description: "If true, pause for user approval before clicking" },
+    },
+    required: ["task"],
+  },
+};
+
 export const ALL_CAPABILITIES: CapabilityDef[] = [
   emailSend,
+  calendarCreateEvent,
   browserNavigate,
   browserSession,
   devDelegate,
+  desktopAutomate,
 ];

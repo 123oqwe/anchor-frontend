@@ -15,7 +15,7 @@ import type { ExecutionContext } from "../execution/registry.js";
 
 export type Platform = "macos" | "windows" | "linux";
 
-export type ProviderKind = "cli" | "mcp";
+export type ProviderKind = "cli" | "mcp" | "vision";
 
 export interface CapabilityDef<Input = any, Output = any> {
   name: string;                    // e.g. "email.send", "browser.navigate"
@@ -57,7 +57,10 @@ export interface ProviderDef<Input = any, Output = any> {
     shortcuts?: string[];          // user-installed Shortcut names (macOS)
     binary?: string;               // required executable on PATH (e.g. "shortcuts", "claude")
     env?: string[];                // required env vars
+    visionModel?: string;          // for kind: "vision" — e.g. "claude-sonnet-4-6" or "ui-tars-7b"
   };
+  /** Codex-style: declares which app/domain this provider targets (for app approval L6) */
+  targetApp?: string;              // "gmail.com" / "com.apple.Mail" / "*" (any)
   /** Serial = one call at a time (browser MCP). Parallel = concurrent OK. */
   concurrency: "parallel" | "serial";
   /** For stateful providers (MCP), how long to keep idle before killing. */

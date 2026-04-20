@@ -83,16 +83,16 @@ export const playwrightCliProvider: ProviderDef<BrowserNavigateInput, BrowserNav
   concurrency: "parallel",   // each call spawns its own browser
 
   async healthCheck(): Promise<HealthStatus> {
-    const has = await hasBinary("npx");
-    if (!has) return { healthy: false, reason: "npx not on PATH", checkedAt: Date.now() };
-    // Probe: `npx --yes playwright --version` is cheap and a proxy for install.
-    // If playwright isn't in node_modules, npx will attempt a network fetch; we
-    // time-box that so health stays snappy.
-    const r = await runCli("npx", ["--yes", "playwright", "--version"], { timeoutMs: 15_000 });
-    if (r.exitCode !== 0) {
+    const hasNode = await hasBinary("node");
+    if (!hasNode) return { healthy: false, reason: "node not on PATH", checkedAt: Date.now() };
+    // Real probe: can `require('playwright')` resolve? This matches what execute() needs,
+    // rather than the looser `npx playwright --version` check which passes even when the
+    // library isn't actually importable.
+    const r = await runCli("node", ["-e", "try{require('playwright');console.log('ok')}catch(e){console.log('missing')}"], { timeoutMs: 5_000 });
+    if (!r.stdout.includes("ok")) {
       return {
         healthy: false,
-        reason: "Playwright not available (run `npm i playwright && npx playwright install chromium`)",
+        reason: "Playwright not installed (run `pnpm add playwright && npx playwright install chromium`)",
         checkedAt: Date.now(),
       };
     }
@@ -100,25 +100,17 @@ export const playwrightCliProvider: ProviderDef<BrowserNavigateInput, BrowserNav
   },
 
   async execute(input): Promise<ProviderResult<BrowserNavigateOutput>> {
-    const r = await runCli(
-      "npx",
-      ["--yes", "playwright", "node", "-e", SCRIPT, JSON.stringify(input)],
-      { timeoutMs: 60_000, maxBuffer: 20_000_000 }
-    );
-    // If --yes playwright+node chain fails, fall back to bare node with env
-    // resolution via local node_modules. We invoke `node -e` directly using the
-    // user's node with playwright resolved from npx's temp install if needed.
+    // Run the headless-chromium script as a Node subprocess. Playwright is
+    // resolved via node's normal require() against node_modules. If missing,
+    // the error surfaces cleanly and dispatcher falls through to vision tier.
+    const r = await runCli("node", ["-e", SCRIPT, JSON.stringify(input)], { timeoutMs: 60_000, maxBuffer: 20_000_000 });
     if (r.exitCode !== 0 || !r.stdout.trim()) {
-      const alt = await runCli("node", ["-e", SCRIPT, JSON.stringify(input)], { timeoutMs: 60_000, maxBuffer: 20_000_000 });
-      if (alt.exitCode !== 0 || !alt.stdout.trim()) {
-        return {
-          success: false,
-          output: `Playwright CLI failed: ${r.stderr.slice(0, 200) || alt.stderr.slice(0, 200) || "no output"}`,
-          error: r.stderr || alt.stderr,
-          errorKind: "retryable",
-        };
-      }
-      return parseResult(alt.stdout);
+      return {
+        success: false,
+        output: `Playwright CLI failed: ${(r.stderr || "no stdout").slice(0, 200)}`,
+        error: r.stderr || "no output",
+        errorKind: "retryable",
+      };
     }
     return parseResult(r.stdout);
   },
