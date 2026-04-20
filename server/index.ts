@@ -38,6 +38,7 @@ import cronsRoutes from "./routes/crons.js";
 import customAgentsRoutes from "./routes/custom-agents.js";
 import mcpRoutes from "./routes/mcp.js";
 import proposalsRoutes from "./routes/proposals.js";
+import bridgesRoutes from "./routes/bridges.js";
 import imessageRoutes from "./integrations/imessage.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -68,6 +69,7 @@ async function startServer() {
   app.use("/api/crons", cronsRoutes);
   app.use("/api/agents", customAgentsRoutes);
   app.use("/api/mcp", mcpRoutes);
+  app.use("/api/bridges", bridgesRoutes);
   app.use("/api/channels/imessage", imessageRoutes);
 
   // ── Static / SPA ──────────────────────────────────────────────────────────

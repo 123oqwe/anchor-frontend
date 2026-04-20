@@ -478,31 +478,9 @@ export function registerDevTools(): void {
     },
   });
 
-  // ═══ Delegation to Claude Code (MCP) ═══════════════════════════════════
+  // Note: `delegate_to_claude_code` is now registered via the L8 Hand bridge
+  // (see server/infra/hand/index.ts). It dispatches to claude-cli (CLI) or
+  // claude-code-mcp (MCP) based on user preference. No stub.
 
-  registerTool({
-    name: "delegate_to_claude_code",
-    description: "Delegate a complex code task to Claude Code via MCP. Use for: writing new code, complex refactors, debugging. Returns Claude Code's result.",
-    handler: "internal",
-    actionClass: "delegate_agent",
-    inputSchema: {
-      type: "object",
-      properties: {
-        task: { type: "string", description: "Describe the task for Claude Code in plain English" },
-        working_dir: { type: "string", description: "Working directory (default: cwd)" },
-      },
-      required: ["task"],
-    },
-    execute: async (input): Promise<ToolResult> => {
-      // Placeholder — actual MCP client integration requires MCP config
-      // For now, returns a stub that the user configures manually
-      return {
-        success: false,
-        output: "delegate_to_claude_code requires MCP client configured for Claude Code. Configure in Settings → Integrations → MCP Servers.",
-        error: "MCP_NOT_CONFIGURED",
-      };
-    },
-  });
-
-  console.log("[Execution] 10 dev tools registered (file, git, shell, test, logs, delegate)");
+  console.log("[Execution] 10 dev tools registered (file, git, shell, test, logs)");
 }

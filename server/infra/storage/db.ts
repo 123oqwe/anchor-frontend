@@ -492,6 +492,44 @@ db.exec(`
   );
 
   CREATE INDEX IF NOT EXISTS idx_dev_proposals_status ON dev_proposals(user_id, status, created_at);
+
+  -- L8-Hand Bridge: capability preferences (per-user provider order + disabled set)
+  CREATE TABLE IF NOT EXISTS capability_preferences (
+    user_id TEXT NOT NULL,
+    capability TEXT NOT NULL,
+    provider_order TEXT NOT NULL DEFAULT '[]',   -- JSON array of provider ids
+    disabled_providers TEXT NOT NULL DEFAULT '[]',
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, capability)
+  );
+
+  -- L8-Hand Bridge: non-OAuth API tokens (Todoist/Linear/etc)
+  CREATE TABLE IF NOT EXISTS api_tokens (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    token TEXT NOT NULL,
+    label TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(user_id, provider)
+  );
+
+  -- L8-Hand Bridge: provider attempt log (reliability telemetry + Twin learning feed)
+  CREATE TABLE IF NOT EXISTS provider_attempts (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    capability TEXT NOT NULL,
+    provider_id TEXT NOT NULL,
+    status TEXT NOT NULL,                        -- success | failed | skipped
+    error_kind TEXT,                             -- terminal | retryable
+    reason TEXT,
+    latency_ms INTEGER NOT NULL DEFAULT 0,
+    run_id TEXT,                                 -- OPT-4 trace correlation
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_provider_attempts_run ON provider_attempts(run_id);
+  CREATE INDEX IF NOT EXISTS idx_provider_attempts_provider ON provider_attempts(provider_id, created_at);
 `);
 
 // ─── Default user seed ────────────────────────────────────────────────────────

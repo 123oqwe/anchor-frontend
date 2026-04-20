@@ -114,8 +114,8 @@ export function registerBuiltinTools(): void {
 
   registerTool({
     name: "send_email",
-    description: "Send an email using the user's Mail.app. No API key needed — uses their own email account.",
-    handler: "shell",
+    description: "Send an email. Dispatches through the Hand bridge → gmail-rest (CLI) or applemail-shortcuts (macOS fallback).",
+    handler: "api",
     actionClass: "send_external",
     inputSchema: {
       type: "object",
@@ -123,37 +123,23 @@ export function registerBuiltinTools(): void {
         to: { type: "string", description: "Recipient email address" },
         subject: { type: "string", description: "Email subject" },
         body: { type: "string", description: "Email body text" },
+        cc: { type: "string" },
+        bcc: { type: "string" },
       },
       required: ["to", "subject", "body"],
     },
-    execute: async (input): Promise<ToolResult> => {
-      try {
-        const script = `
-tell application "Mail"
-  set newMessage to make new outgoing message with properties {subject:"${input.subject.replace(/"/g, '\\"')}", content:"${input.body.replace(/"/g, '\\"').replace(/\n/g, '\\n')}"}
-  tell newMessage
-    make new to recipient with properties {address:"${input.to}"}
-  end tell
-  send newMessage
-end tell`;
-        const result = runAppleScript(script);
-        if (result === null) {
-          // Permission denied — fall back to opening compose window
-          runAppleScript(`tell application "Mail" to activate`);
-          runAppleScript(`open location "mailto:${input.to}?subject=${encodeURIComponent(input.subject)}&body=${encodeURIComponent(input.body)}"`);
-          return { success: true, output: `Mail.app opened with draft to ${input.to}. Please click Send.` };
-        }
-        logExecution("Execution Agent", `Email sent to ${input.to}: ${input.subject}`);
-        return { success: true, output: `Email sent to ${input.to}: "${input.subject}"` };
-      } catch (err: any) {
-        // Ultimate fallback — open mailto link in default mail client
-        try {
-          execSync(`open "mailto:${input.to}?subject=${encodeURIComponent(input.subject)}&body=${encodeURIComponent(input.body)}"`, { timeout: 5000 });
-          return { success: true, output: `Opened email draft to ${input.to} in default mail app.` };
-        } catch {
-          return { success: false, output: `Failed to send email: ${err.message}`, error: err.message };
-        }
+    execute: async (input, ctx): Promise<ToolResult> => {
+      const { dispatchCapability } = await import("../bridges/registry.js");
+      const r = await dispatchCapability("email.send", input, ctx);
+      if (!r.success) {
+        return { success: false, output: r.output, error: r.error };
       }
+      logExecution("Execution Agent", `Email sent via ${r.providerId} to ${input.to}: ${input.subject}`);
+      return {
+        success: true,
+        output: r.output,
+        data: { ...(r.data ?? {}), providerId: r.providerId },
+      };
     },
   });
 
