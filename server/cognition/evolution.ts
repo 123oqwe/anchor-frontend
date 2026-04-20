@@ -235,6 +235,12 @@ function updateAndAdjust(
       active_hours: Object.keys(hourCounts).map(Number).sort((a, b) => a - b),
     }));
   }
+
+  // Update writing_style
+  const writingStyle = analyzeWritingStyle();
+  if (writingStyle) {
+    setDimension("writing_style", writingStyle);
+  }
 }
 
 // ── Prompt Adaptation — read by Decision Agent ─────────────────────────────
@@ -286,8 +292,54 @@ export function getPromptAdaptations(): string {
     } catch (e) { console.error("[Evolution] Failed to parse domain_weights:", e); }
   }
 
+  // Writing style
+  const writingStyle = state["writing_style"];
+  if (writingStyle) {
+    adaptations.push(`ADAPTATION: When drafting content for this user, match their style: ${writingStyle}. Mirror their voice, not a generic AI tone.`);
+  }
+
   if (adaptations.length === 0) return "";
   return "\n\n" + adaptations.join("\n");
+}
+
+// ── Writing Style Analysis ────────────────────────────────────────────────
+
+function analyzeWritingStyle(): string | null {
+  const msgs = db.prepare(
+    "SELECT content FROM messages WHERE user_id=? AND role='user' AND mode='personal' AND created_at >= datetime('now', '-7 days') ORDER BY created_at DESC LIMIT 20"
+  ).all(DEFAULT_USER_ID) as any[];
+
+  if (msgs.length < 5) return null;
+
+  const contents = msgs.map((m: any) => m.content);
+  const avgLength = contents.reduce((s: number, c: string) => s + c.length, 0) / contents.length;
+  const avgWords = contents.reduce((s: number, c: string) => s + c.split(/\s+/).length, 0) / contents.length;
+  const usesEmoji = contents.some((c: string) => c !== c.replace(/[\uD83C-\uDBFF][\uDC00-\uDFFF]/g, ""));
+  const usesChinese = contents.some((c: string) => /[\u4e00-\u9fff]/.test(c));
+  const usesExclamation = contents.filter((c: string) => c.includes("!")).length / contents.length;
+  const formal = contents.filter((c: string) => /please|kindly|would you|could you/i.test(c)).length / contents.length;
+
+  const traits: string[] = [];
+
+  // Length
+  if (avgWords < 10) traits.push("very terse (avg " + Math.round(avgWords) + " words)");
+  else if (avgWords < 30) traits.push("concise");
+  else if (avgWords > 60) traits.push("detailed and thorough");
+  else traits.push("moderate length");
+
+  // Language
+  if (usesChinese) traits.push("mixes Chinese and English");
+
+  // Tone
+  if (usesExclamation > 0.3) traits.push("enthusiastic (uses !)");
+  else traits.push("calm tone");
+
+  if (formal > 0.3) traits.push("formal");
+  else traits.push("casual/direct");
+
+  if (usesEmoji) traits.push("uses emoji occasionally");
+
+  return traits.join(", ");
 }
 
 // ── Master Evolution Loop ──────────────────────────────────────────────────

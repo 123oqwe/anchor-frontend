@@ -10,6 +10,7 @@
 import { execSync } from "child_process";
 import { db, DEFAULT_USER_ID } from "../../infra/storage/db.js";
 import { nanoid } from "nanoid";
+import { bus } from "../../orchestration/bus.js";
 
 // ── Activity capture table ──────────────────────────────────────────────────
 
@@ -135,6 +136,45 @@ export function captureActiveWindow(): { app: string; title: string; url: string
     // Save to DB
     db.prepare("INSERT INTO activity_captures (id, user_id, app_name, window_title, url, content, captured_at) VALUES (?,?,?,?,?,?,datetime('now'))")
       .run(nanoid(), DEFAULT_USER_ID, app.trim(), (title ?? "").trim(), url, content);
+
+    // Real-time context surfacing (inspired by Rahi/Dume)
+    // Check if current activity matches graph nodes → push relevant hint
+    try {
+      const searchText = `${(title ?? "").trim()} ${url} ${content}`.toLowerCase();
+      if (searchText.length > 10) {
+        // Find graph nodes that match current screen context
+        const nodes = db.prepare(
+          "SELECT id, label, status, type FROM graph_nodes WHERE user_id=? AND (status IN ('overdue','delayed','blocked','decaying') OR type IN ('goal','project','risk'))"
+        ).all(DEFAULT_USER_ID) as any[];
+
+        for (const node of nodes) {
+          const firstName = node.label.split(/[\s(\/\-]/)[0].toLowerCase();
+          if (firstName.length >= 3 && searchText.includes(firstName)) {
+            // Match found — check if we recently surfaced this (prevent spam)
+            const recentSurface = db.prepare(
+              "SELECT id FROM agent_executions WHERE agent='Context Surface' AND action LIKE ? AND created_at >= datetime('now', '-2 hours')"
+            ).get(`%${node.label.slice(0, 20)}%`) as any;
+
+            if (!recentSurface) {
+              // Surface it
+              const hint = node.status === "overdue" ? `Overdue: "${node.label}" needs attention`
+                : node.status === "decaying" ? `Fading: haven't touched "${node.label}" recently`
+                : node.type === "risk" ? `Risk: "${node.label}" is relevant to what you're viewing`
+                : `Related: "${node.label}" (${node.status})`;
+
+              bus.publish({
+                type: "NOTIFICATION" as any,
+                payload: { id: nanoid(), type: "context_surface", title: "Context", body: hint, priority: "low" },
+              });
+
+              db.prepare("INSERT INTO agent_executions (id, user_id, agent, action, status) VALUES (?,?,?,?,?)")
+                .run(nanoid(), DEFAULT_USER_ID, "Context Surface", `Surfaced: ${node.label.slice(0, 40)} while viewing ${(title ?? "").slice(0, 30)}`, "success");
+            }
+            break; // Only surface one hint per capture
+          }
+        }
+      }
+    } catch {}
 
     return { app: app.trim(), title: (title ?? "").trim(), url, content };
   } catch {

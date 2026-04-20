@@ -28,6 +28,69 @@ interface Checkpoint {
   timestamp: string;
 }
 
+// ── Context helpers ────────────────────────────────────────────────────────
+
+/** Get context for execution: relevant graph nodes, memories, recent activity. */
+function getExecutionContext(steps: EditableStep[]): string {
+  const lines: string[] = [];
+  const stepsText = steps.map(s => s.content).join(" ");
+
+  // Find mentioned people in the plan steps
+  const people = db.prepare(
+    "SELECT id, label, detail, status FROM graph_nodes WHERE user_id=? AND type='person'"
+  ).all(DEFAULT_USER_ID) as any[];
+
+  const mentionedPeople = people.filter((p: any) => {
+    const firstName = p.label.split(/[\s(]/)[0];
+    return firstName.length >= 2 && stepsText.toLowerCase().includes(firstName.toLowerCase());
+  });
+
+  if (mentionedPeople.length > 0) {
+    lines.push("PEOPLE MENTIONED:");
+    for (const p of mentionedPeople) {
+      lines.push(`  ${p.label} (${p.status}): ${(p.detail ?? "").slice(0, 100)}`);
+      // Get recent memories about this person
+      const mems = db.prepare(
+        "SELECT title, content FROM memories WHERE user_id=? AND (content LIKE ? OR title LIKE ?) ORDER BY created_at DESC LIMIT 2"
+      ).all(DEFAULT_USER_ID, `%${p.label.split(/[\s(]/)[0]}%`, `%${p.label.split(/[\s(]/)[0]}%`) as any[];
+      for (const m of mems) {
+        lines.push(`    Memory: ${m.content.slice(0, 80)}`);
+      }
+    }
+  }
+
+  // Recent activity context (last 2 hours)
+  const recentActivity = db.prepare(
+    "SELECT app_name, window_title, content FROM activity_captures WHERE user_id=? AND captured_at >= datetime('now', '-2 hours') AND window_title != '' ORDER BY captured_at DESC LIMIT 5"
+  ).all(DEFAULT_USER_ID) as any[];
+
+  if (recentActivity.length > 0) {
+    lines.push("RECENT ACTIVITY:");
+    for (const a of recentActivity) {
+      lines.push(`  ${(a as any).app_name}: ${(a as any).window_title.slice(0, 60)}`);
+    }
+  }
+
+  return lines.join("\n") || "No additional context available.";
+}
+
+/** Get writing style hint from evolution_state. */
+function getWritingStyleHint(): string {
+  const style = db.prepare(
+    "SELECT current_value FROM evolution_state WHERE user_id=? AND dimension='writing_style'"
+  ).get(DEFAULT_USER_ID) as any;
+  if (style?.current_value) return style.current_value;
+  // Fallback: analyze recent messages
+  const msgs = db.prepare(
+    "SELECT content FROM messages WHERE user_id=? AND role='user' AND mode='personal' ORDER BY created_at DESC LIMIT 10"
+  ).all(DEFAULT_USER_ID) as any[];
+  if (msgs.length < 3) return "professional, concise";
+  const avgLen = msgs.reduce((s: number, m: any) => s + m.content.length, 0) / msgs.length;
+  if (avgLen < 50) return "very concise, direct, minimal";
+  if (avgLen > 200) return "detailed, analytical, thorough";
+  return "balanced, professional";
+}
+
 // ── Main ReAct execution ────────────────────────────────────────────────────
 
 export async function runExecutionReAct(steps: EditableStep[]) {
@@ -96,6 +159,11 @@ RULES:
 2. After executing all steps, call record_outcome with a summary.
 3. If a tool returns an error, note it and continue to the next step.
 4. Do not skip steps — attempt each one.
+5. When drafting emails or messages, use the CONTEXT below to personalize content.
+6. Match the user's writing style: ${getWritingStyleHint()}
+
+CONTEXT (use this to make emails/drafts specific and personal):
+${getExecutionContext(steps)}
 
 Available tools: ${toolDefs.map(t => t.name).join(", ")}`,
         tools: toolDefs as any,
