@@ -20,6 +20,7 @@ import { startEventHandlers } from "./orchestration/handlers.js";
 import { startCronJobs } from "./orchestration/cron.js";
 import { startEventTriggers, startWatchersFromAgents } from "./orchestration/event-triggers.js";
 import { startUserCronRuntime } from "./orchestration/user-cron-runtime.js";
+import { startTaskBrain } from "./orchestration/task-brain.js";
 
 // Route handlers
 import userRoutes from "./routes/user.js";
@@ -40,6 +41,7 @@ import customAgentsRoutes from "./routes/custom-agents.js";
 import mcpRoutes from "./routes/mcp.js";
 import proposalsRoutes from "./routes/proposals.js";
 import bridgesRoutes from "./routes/bridges.js";
+import jobsRoutes from "./routes/jobs.js";
 import bridgeLocalRoutes from "./routes/bridge-local.js";
 import anchorKernelRoutes from "./routes/anchor-kernel.js";
 import imessageRoutes from "./integrations/imessage.js";
@@ -73,6 +75,7 @@ async function startServer() {
   app.use("/api/agents", customAgentsRoutes);
   app.use("/api/mcp", mcpRoutes);
   app.use("/api/bridges", bridgesRoutes);
+  app.use("/api/jobs", jobsRoutes);                  // Task Brain ledger
   app.use("/local/bridge", bridgeLocalRoutes);      // subprocess → bridge (token-scoped)
   app.use("/local/anchor", anchorKernelRoutes);     // subprocess → kernel (graph/memory/state/web/think)
   app.use("/api/channels/imessage", imessageRoutes);
@@ -97,7 +100,8 @@ async function startServer() {
   startCronJobs();
   startEventTriggers();                          // OPT-2: route events to Custom Agents
   startWatchersFromAgents().catch(() => {});     // OPT-2: start file/idle watchers if agents need them
-  startUserCronRuntime();                        // Hand Bridge: user_crons scheduler (fires actions via bridge)
+  startTaskBrain();                              // P4: agent_jobs ledger worker (claim/execute/retry)
+  startUserCronRuntime();                        // user_crons scheduler (enqueues to Task Brain on fire)
 
   // ── WebSocket — real-time event push to frontend ───────────────────────────
   const wss = new WebSocketServer({ server, path: "/ws" });

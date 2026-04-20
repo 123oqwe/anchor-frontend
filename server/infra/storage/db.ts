@@ -630,6 +630,31 @@ try { db.exec(`
 `); } catch {}
 try { db.exec("CREATE INDEX IF NOT EXISTS idx_agent_skills_agent ON agent_skills(agent_id)"); } catch {}
 
+// P4 Task Brain: unified job ledger with state machine (pending/running/succeeded/failed/retrying/cancelled)
+try { db.exec(`
+  CREATE TABLE IF NOT EXISTS agent_jobs (
+    id TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    source_id TEXT,
+    action_type TEXT NOT NULL,
+    action_config TEXT NOT NULL DEFAULT '{}',
+    name TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 3,
+    next_run_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_error TEXT,
+    result_summary TEXT,
+    run_id TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    started_at TEXT,
+    finished_at TEXT
+  )
+`); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_jobs_state_next ON agent_jobs(state, next_run_at)"); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_jobs_created ON agent_jobs(created_at DESC)"); } catch {}
+
 seedIfEmpty();
 
 /** Shared agent execution logger — replaces duplicate log() in 19 files. */
