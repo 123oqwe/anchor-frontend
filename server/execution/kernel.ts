@@ -154,6 +154,33 @@ register("state.list", async (_args, caller) => {
   return rows;
 });
 
+// ── blackboard.* — mission-scoped KV shared across agents (P6 swarm) ────────
+
+register("blackboard.get", async (args, caller) => {
+  const key = String(args.key ?? "");
+  if (!key) throw new Error("blackboard.get requires key");
+  const row = db.prepare("SELECT value FROM mission_kv WHERE mission_id=? AND key=?").get(caller.missionId, key) as any;
+  return { value: row?.value ?? null };
+});
+
+register("blackboard.set", async (args, caller) => {
+  const key = String(args.key ?? "");
+  const value = String(args.value ?? "");
+  if (!key) throw new Error("blackboard.set requires key");
+  if (value.length > 50_000) throw new Error("value exceeds 50KB blackboard limit");
+  db.prepare(
+    "INSERT OR REPLACE INTO mission_kv (mission_id, key, value, updated_at) VALUES (?,?,?,datetime('now'))"
+  ).run(caller.missionId, key, value);
+  return { ok: true, bytes: value.length };
+});
+
+register("blackboard.list", async (_args, caller) => {
+  const rows = db.prepare(
+    "SELECT key, value, updated_at as updatedAt FROM mission_kv WHERE mission_id=? ORDER BY updated_at DESC"
+  ).all(caller.missionId) as any[];
+  return rows;
+});
+
 // ── web.* — reuse tools.ts implementations ──────────────────────────────────
 
 register("web.search", async (args, caller) => {

@@ -22,6 +22,7 @@ import { nanoid } from "nanoid";
 import { writeMemory } from "../memory/retrieval.js";
 import { registerExecuteCodeTool } from "./tools/execute-code.js";
 import { registerDelegateTool } from "./tools/delegate.js";
+import { registerHandoffTool } from "./tools/handoff.js";
 
 /** Run AppleScript safely. Returns output string or null on failure. */
 function runAppleScript(script: string): string | null {
@@ -364,9 +365,10 @@ end tell`;
   // ═══ Agent Composition — delegate (Claude Code-style subagent) ═════════
   // (registered below via registerDelegateTool — replaces old call_agent)
 
-  // Register tools from dedicated files (real subprocess execute_code, subagent delegate)
+  // Register tools from dedicated files (subprocess execute_code + subagent delegate + peer handoff)
   registerExecuteCodeTool();
   registerDelegateTool();
+  registerHandoffTool();
 
-  console.log(`[Execution] 13 tools registered (3 DB + 4 shell + 2 network + 1 execute_code + 2 agent_state + 1 delegate)`);
+  console.log(`[Execution] 14 tools registered (3 DB + 4 shell + 2 network + 1 execute_code + 2 agent_state + 1 delegate + 1 handoff)`);
 }

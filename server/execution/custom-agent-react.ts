@@ -102,6 +102,7 @@ export async function runCustomAgentReAct(opts: {
   userMessage: string;
   allowedTools: string[];
   runId: string;
+  missionId?: string;   // P6 — inherited across handoffs / delegates in a mission
 }): Promise<CustomAgentReActResult> {
   const { model: routedModel, capability } = routeTask("react_execution");
   const modelId = routedModel.id;
@@ -197,6 +198,7 @@ export async function runCustomAgentReAct(opts: {
         totalSteps: MAX_TURNS,
         agentId: opts.agentId,
         runId: opts.runId,
+        missionId: opts.missionId ?? opts.runId,
       };
 
       const toolStart = Date.now();

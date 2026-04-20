@@ -77,6 +77,7 @@ export function registerExecuteCodeTool(): void {
         agentId: agent.id,
         agentName: agent.name,
         runId: ctx?.runId ?? "no-run",
+        missionId: ctx?.missionId ?? ctx?.runId ?? "no-mission",
         allowedBridges: agent.allowedBridges,
       });
 
@@ -100,6 +101,7 @@ export function registerExecuteCodeTool(): void {
         ANCHOR_AGENT_ID: agent.id,
         ANCHOR_AGENT_NAME: agent.name,
         ANCHOR_RUN_ID: ctx?.runId ?? "",
+        ANCHOR_MISSION_ID: ctx?.missionId ?? ctx?.runId ?? "",
         ANCHOR_WORKSPACE: workspace,
         // Make `import anchor` / `require("anchor")` resolve to our client runtime
         PYTHONPATH: CLIENT_RUNTIME_DIR + (process.env.PYTHONPATH ? ":" + process.env.PYTHONPATH : ""),

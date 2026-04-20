@@ -93,9 +93,10 @@ module.exports = {
   desktop:  bridgeNs("desktop"),
   dev:      bridgeNs("dev"),
   // Kernel
-  graph:  kernelNs("graph"),
-  memory: kernelNs("memory"),
-  state:  kernelNs("state"),
-  web:    kernelNs("web"),
-  tasks:  kernelNs("tasks"),
+  graph:      kernelNs("graph"),
+  memory:     kernelNs("memory"),
+  state:      kernelNs("state"),
+  web:        kernelNs("web"),
+  tasks:      kernelNs("tasks"),
+  blackboard: kernelNs("blackboard"),  // mission-scoped, shared across agents
 };

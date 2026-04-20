@@ -47,6 +47,7 @@ export interface ExecutionContext {
   totalSteps: number;
   agentId?: string;     // OPT-5: identifies which custom agent is calling (for KV scoping)
   runId?: string;       // OPT-4: trace correlation across tools+LLM calls
+  missionId?: string;   // P6: shared blackboard scope across agents in a mission (handoff/delegate inherit)
 }
 
 // ── Registry ────────────────────────────────────────────────────────────────

@@ -26,6 +26,7 @@ export interface TokenPayload {
   agentId: string;
   agentName: string;
   runId: string;
+  missionId: string;          // P6: mission scope for shared blackboard
   allowedBridges: string[];   // ["*"] means any capability
   expiresAt: number;          // unix ms
 }
@@ -52,6 +53,8 @@ export function verifyToken(token: string): TokenPayload | null {
     const payload = JSON.parse(Buffer.from(body, "base64url").toString()) as TokenPayload;
     if (typeof payload.expiresAt !== "number" || Date.now() > payload.expiresAt) return null;
     if (!Array.isArray(payload.allowedBridges)) return null;
+    // Backfill missionId for tokens minted before P6 (defensive)
+    if (typeof payload.missionId !== "string") payload.missionId = payload.runId;
     return payload;
   } catch { return null; }
 }

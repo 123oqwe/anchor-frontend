@@ -166,3 +166,4 @@ memory = _KernelNs("memory")
 state = _KernelNs("state")
 web = _KernelNs("web")
 tasks = _KernelNs("tasks")
+blackboard = _KernelNs("blackboard")   # mission-scoped, shared across agents in a handoff/delegate chain

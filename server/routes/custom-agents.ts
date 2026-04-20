@@ -191,7 +191,7 @@ Respond ONLY with JSON:
   "suggested_schedule": null | { "pattern": "cron pattern", "description": "human readable" }
 }
 
-Available tools: web_search, read_url, send_email, create_calendar_event, create_reminder, execute_code, delegate, write_task, update_graph_node, agent_state_get, agent_state_set
+Available tools: web_search, read_url, send_email, create_calendar_event, create_reminder, execute_code, delegate, handoff, write_task, update_graph_node, agent_state_get, agent_state_set
 If the user mentions a recurring schedule (weekly, daily, etc), suggest a cron schedule.`,
       messages: [{ role: "user", content: description }],
       maxTokens: 300,

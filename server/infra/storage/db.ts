@@ -655,6 +655,18 @@ try { db.exec(`
 try { db.exec("CREATE INDEX IF NOT EXISTS idx_jobs_state_next ON agent_jobs(state, next_run_at)"); } catch {}
 try { db.exec("CREATE INDEX IF NOT EXISTS idx_jobs_created ON agent_jobs(created_at DESC)"); } catch {}
 
+// P6 Swarm: shared blackboard across agents participating in the same mission.
+// mission_id is inherited by handoffs / delegates of a top-level agent run.
+try { db.exec(`
+  CREATE TABLE IF NOT EXISTS mission_kv (
+    mission_id TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (mission_id, key)
+  )
+`); } catch {}
+
 seedIfEmpty();
 
 /** Shared agent execution logger — replaces duplicate log() in 19 files. */
