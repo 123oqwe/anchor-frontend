@@ -413,5 +413,50 @@ end tell`;
     },
   });
 
-  console.log(`[Execution] 12 tools registered (3 DB + 4 shell + 2 network + 1 code + 2 agent_state)`);
+  // ═══ Agent Composition (OPT-3) ═════════════════════════════════════════
+
+  registerTool({
+    name: "call_agent",
+    description: "Invoke another custom agent by name and get its response. Use for composing agents: Agent A can call Agent B.",
+    handler: "internal",
+    actionClass: "delegate_agent",
+    inputSchema: {
+      type: "object",
+      properties: {
+        agent_name: { type: "string", description: "Name of the custom agent to call" },
+        input: { type: "string", description: "Input message to send to that agent" },
+      },
+      required: ["agent_name", "input"],
+    },
+    execute: async (input, ctx): Promise<ToolResult> => {
+      // Recursion guard via ExecutionContext.stepIndex chain (simple: cap depth 3)
+      const prevCallAgent = (ctx?.previousResults ?? []).filter(r => r.toolName === "call_agent").length;
+      if (prevCallAgent >= 2) {
+        return { success: false, output: "Max agent call depth (3) exceeded", error: "MAX_DEPTH" };
+      }
+
+      const agent = db.prepare("SELECT * FROM user_agents WHERE user_id=? AND name=?")
+        .get(DEFAULT_USER_ID, input.agent_name) as any;
+      if (!agent) return { success: false, output: `Agent not found: ${input.agent_name}`, error: "NOT_FOUND" };
+
+      try {
+        const { text: llmText } = await import("../infra/compute/index.js");
+        const { serializeForPrompt } = await import("../graph/reader.js");
+        const systemPrompt = `${agent.instructions}\n\nUser's Human Graph context:\n${serializeForPrompt()}`;
+        const result = await llmText({
+          task: "decision",
+          system: systemPrompt,
+          messages: [{ role: "user", content: input.input }],
+          maxTokens: 1000,
+          runId: ctx?.runId,
+          agentName: `Called: ${agent.name}`,
+        });
+        return { success: true, output: result, data: { agent_name: agent.name } };
+      } catch (err: any) {
+        return { success: false, output: `Agent call failed: ${err.message}`, error: err.message };
+      }
+    },
+  });
+
+  console.log(`[Execution] 13 tools registered (3 DB + 4 shell + 2 network + 1 code + 2 agent_state + 1 call_agent)`);
 }

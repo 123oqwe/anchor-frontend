@@ -165,6 +165,11 @@ export const api = {
   generateAgentFromDescription: (description: string) => req<any>("POST", "/api/agents/custom/from-description", { description }),
   exportCustomAgent: (id: string) => req<any>("GET", `/api/agents/custom/${id}/export`),
   importCustomAgent: (data: any) => req<any>("POST", "/api/agents/custom/import", data),
+  getPipelines: () => req<any[]>("GET", "/api/agents/pipelines"),
+  createPipeline: (data: any) => req<any>("POST", "/api/agents/pipelines", data),
+  runPipeline: (id: string, input: string) => req<any>("POST", `/api/agents/pipelines/${id}/run`, { input }),
+  getPipelineRuns: (id: string) => req<any[]>("GET", `/api/agents/pipelines/${id}/runs`),
+  deletePipeline: (id: string) => req("DELETE", `/api/agents/pipelines/${id}`),
   generateCronFromDescription: (description: string) => req<any>("POST", "/api/crons/from-description", { description }),
 
   // Crons

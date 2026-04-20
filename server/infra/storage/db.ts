@@ -448,6 +448,32 @@ db.exec(`
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (agent_id, key)
   );
+
+  -- OPT-3: Agent pipelines (chain multiple custom agents)
+  CREATE TABLE IF NOT EXISTS agent_pipelines (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    steps TEXT NOT NULL,              -- JSON: [{agent_id, input_template, output_key}]
+    trigger_type TEXT DEFAULT 'manual',
+    trigger_config TEXT DEFAULT '{}',
+    enabled INTEGER DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS pipeline_runs (
+    id TEXT PRIMARY KEY,
+    pipeline_id TEXT NOT NULL,
+    started_at TEXT NOT NULL DEFAULT (datetime('now')),
+    finished_at TEXT,
+    status TEXT NOT NULL DEFAULT 'running',
+    step_results TEXT NOT NULL DEFAULT '[]',
+    total_cost REAL NOT NULL DEFAULT 0,
+    error TEXT
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_pipeline_runs ON pipeline_runs(pipeline_id, started_at);
 `);
 
 // ─── Default user seed ────────────────────────────────────────────────────────

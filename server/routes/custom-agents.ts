@@ -195,6 +195,67 @@ If the user mentions a recurring schedule (weekly, daily, etc), suggest a cron s
   }
 });
 
+// ── OPT-3: Agent Pipelines ─────────────────────────────────────────────────
+
+// List pipelines
+router.get("/pipelines", (_req, res) => {
+  const rows = db.prepare("SELECT * FROM agent_pipelines WHERE user_id=? ORDER BY created_at DESC").all(DEFAULT_USER_ID) as any[];
+  res.json(rows.map((p: any) => ({
+    ...p,
+    steps: JSON.parse(p.steps),
+    trigger_config: JSON.parse(p.trigger_config),
+  })));
+});
+
+// Create pipeline
+router.post("/pipelines", (req, res) => {
+  const { name, description, steps, trigger_type, trigger_config } = req.body;
+  if (!name || !Array.isArray(steps) || steps.length === 0) {
+    return res.status(400).json({ error: "name and non-empty steps required" });
+  }
+  if (steps.length > 10) return res.status(400).json({ error: "Max 10 steps per pipeline" });
+
+  // Validate each step has agent_id and input_template
+  for (const s of steps) {
+    if (!s.agent_id || typeof s.input_template !== "string") {
+      return res.status(400).json({ error: "Each step needs agent_id and input_template" });
+    }
+  }
+
+  const id = nanoid();
+  db.prepare(
+    "INSERT INTO agent_pipelines (id, user_id, name, description, steps, trigger_type, trigger_config) VALUES (?,?,?,?,?,?,?)"
+  ).run(id, DEFAULT_USER_ID, name, description ?? "", JSON.stringify(steps), trigger_type ?? "manual", JSON.stringify(trigger_config ?? {}));
+  res.json({ id });
+});
+
+// Run pipeline
+router.post("/pipelines/:id/run", async (req, res) => {
+  const { input } = req.body;
+  if (typeof input !== "string") return res.status(400).json({ error: "input (string) required" });
+  try {
+    const { runPipeline } = await import("../orchestration/pipeline.js");
+    const result = await runPipeline(req.params.id, input);
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// List runs
+router.get("/pipelines/:id/runs", (req, res) => {
+  const rows = db.prepare(
+    "SELECT * FROM pipeline_runs WHERE pipeline_id=? ORDER BY started_at DESC LIMIT 30"
+  ).all(req.params.id);
+  res.json(rows.map((r: any) => ({ ...r, step_results: JSON.parse(r.step_results) })));
+});
+
+// Delete pipeline
+router.delete("/pipelines/:id", (req, res) => {
+  db.prepare("DELETE FROM agent_pipelines WHERE id=? AND user_id=?").run(req.params.id, DEFAULT_USER_ID);
+  res.json({ ok: true });
+});
+
 // ── OPT-6: Agent Export / Import ───────────────────────────────────────────
 
 // Export a custom agent as JSON (portable definition)
