@@ -180,6 +180,7 @@ export const api = {
   triggerGoogleScan: () => req<any>("POST", "/api/integrations/google/scan", {}),
 
   // Integrations — Local scan (no OAuth needed)
+  getActivitySummary: (hours?: number) => req<any>("GET", `/api/integrations/activity/summary${hours ? `?hours=${hours}` : ""}`),
   getLocalScanStatus: () => req<any>("GET", "/api/integrations/local/status"),
   triggerLocalScan: () => req<any>("POST", "/api/integrations/local/scan", {}),
   triggerBrowserScan: () => req<any>("POST", "/api/integrations/local/scan/browser", {}),

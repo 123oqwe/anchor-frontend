@@ -113,6 +113,17 @@ router.get("/activity/status", async (_req, res) => {
   res.json(getActivityStatus());
 });
 
+router.get("/activity/summary", async (req, res) => {
+  try {
+    const { generateActivitySummary } = await import("../integrations/local/activity-monitor.js");
+    const hours = parseInt(req.query.hours as string) || 24;
+    const summary = generateActivitySummary(Math.min(hours, 168));
+    res.json(summary);
+  } catch (err: any) {
+    res.json({ totalMinutes: 0, topApps: [], activities: [], meetings: [], contentHighlights: [] });
+  }
+});
+
 router.get("/activity/time", async (req, res) => {
   const hours = parseInt(req.query.hours as string) || 24;
   const { getTimeByApp, getTimeByProject, getPersonActivity } = await import("../integrations/local/activity-monitor.js");

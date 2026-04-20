@@ -28,10 +28,66 @@ try {
 } catch {}
 
 try { db.exec("ALTER TABLE activity_captures ADD COLUMN url TEXT NOT NULL DEFAULT ''"); } catch {}
+try { db.exec("ALTER TABLE activity_captures ADD COLUMN content TEXT NOT NULL DEFAULT ''"); } catch {}
 
 // ── Capture current active window ───────────────────────────────────────────
 
-export function captureActiveWindow(): { app: string; title: string; url: string } | null {
+/** Read visible text from the active window via Accessibility API (macOS). */
+function readScreenText(appName: string): string {
+  try {
+    // For editors: read the document name + visible content hint
+    if (["Cursor", "Visual Studio Code", "Xcode", "Terminal"].includes(appName)) {
+      const result = execSync(
+        `osascript -e 'tell application "System Events" to tell process "${appName}"
+          try
+            set focusedEl to value of attribute "AXFocusedUIElement" of application process "${appName}"
+            return focusedEl
+          on error
+            return ""
+          end try
+        end tell'`,
+        { timeout: 2000, encoding: "utf-8" }
+      ).trim();
+      return result.slice(0, 500);
+    }
+
+    // For browsers: read page title (already have URL, title gives more context)
+    if (["Google Chrome", "Safari", "Arc"].includes(appName)) {
+      // Title already captured, skip deep reading
+      return "";
+    }
+
+    // For communication apps: read the focused text element
+    if (["Slack", "Discord", "Telegram", "WeChat", "Mail", "Messages"].includes(appName)) {
+      const result = execSync(
+        `osascript -e 'tell application "System Events" to tell process "${appName}"
+          try
+            return value of text area 1 of scroll area 1 of window 1
+          on error
+            try
+              return description of window 1
+            on error
+              return ""
+            end try
+          end try
+        end tell'`,
+        { timeout: 2000, encoding: "utf-8" }
+      ).trim();
+      // Truncate and filter sensitive content
+      const text = result.slice(0, 500);
+      // Don't capture if it looks like a password or credit card
+      if (/\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b/.test(text)) return "";
+      if (/password|credential|secret|token/i.test(text)) return "";
+      return text;
+    }
+
+    return "";
+  } catch {
+    return "";
+  }
+}
+
+export function captureActiveWindow(): { app: string; title: string; url: string; content: string } | null {
   try {
     const result = execSync(
       `osascript -e 'tell application "System Events"
@@ -73,11 +129,14 @@ export function captureActiveWindow(): { app: string; title: string; url: string
       } catch {}
     }
 
-    // Save to DB
-    db.prepare("INSERT INTO activity_captures (id, user_id, app_name, window_title, url, captured_at) VALUES (?,?,?,?,?,datetime('now'))")
-      .run(nanoid(), DEFAULT_USER_ID, app.trim(), (title ?? "").trim(), url);
+    // Read screen text content (Littlebird-inspired)
+    const content = readScreenText(app.trim());
 
-    return { app: app.trim(), title: (title ?? "").trim(), url };
+    // Save to DB
+    db.prepare("INSERT INTO activity_captures (id, user_id, app_name, window_title, url, content, captured_at) VALUES (?,?,?,?,?,?,datetime('now'))")
+      .run(nanoid(), DEFAULT_USER_ID, app.trim(), (title ?? "").trim(), url, content);
+
+    return { app: app.trim(), title: (title ?? "").trim(), url, content };
   } catch {
     return null;
   }
@@ -289,6 +348,73 @@ export function getActivityStatus() {
     topApps,
     topProjects,
     totalScreenMinutes: topApps.reduce((s, a) => s + a.minutes, 0),
+  };
+}
+
+// ── Daily activity summary (Littlebird-inspired) ──────────────────────────
+
+export function generateActivitySummary(hours = 24): {
+  totalMinutes: number;
+  topApps: { app: string; minutes: number }[];
+  activities: { time: string; app: string; detail: string }[];
+  meetings: { title: string; duration: number }[];
+  contentHighlights: string[];
+} {
+  const appTime = getTimeByApp(hours);
+  const totalMinutes = appTime.reduce((s, a) => s + a.minutes, 0);
+
+  // Get distinct activities with content
+  const activities = db.prepare(`
+    SELECT app_name, window_title, url, content, captured_at
+    FROM activity_captures
+    WHERE user_id=? AND captured_at >= datetime('now', '-${hours} hours')
+    AND window_title != ''
+    ORDER BY captured_at DESC LIMIT 50
+  `).all(DEFAULT_USER_ID) as any[];
+
+  // Deduplicate by window_title (keep most recent)
+  const seen = new Set<string>();
+  const uniqueActivities = activities.filter((a: any) => {
+    const key = a.app_name + "|" + a.window_title;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).slice(0, 20).map((a: any) => ({
+    time: a.captured_at?.slice(11, 16) ?? "",
+    app: a.app_name,
+    detail: a.url ? `${a.window_title} (${a.url.slice(0, 60)})` : a.window_title,
+  }));
+
+  // Detect meetings (Zoom/Teams/Meet in app name or title)
+  const meetingCaptures = db.prepare(`
+    SELECT window_title, MIN(captured_at) as start_time, COUNT(*) as captures
+    FROM activity_captures
+    WHERE user_id=? AND captured_at >= datetime('now', '-${hours} hours')
+    AND (app_name IN ('zoom.us', 'Microsoft Teams', 'FaceTime')
+         OR window_title LIKE '%meeting%' OR window_title LIKE '%Meet -%')
+    GROUP BY window_title
+  `).all(DEFAULT_USER_ID) as any[];
+
+  const meetings = meetingCaptures.map((m: any) => ({
+    title: m.window_title,
+    duration: m.captures * 5, // each capture = 5 min
+  }));
+
+  // Content highlights (non-empty content entries)
+  const contentRows = db.prepare(`
+    SELECT DISTINCT content FROM activity_captures
+    WHERE user_id=? AND content != '' AND captured_at >= datetime('now', '-${hours} hours')
+    ORDER BY captured_at DESC LIMIT 10
+  `).all(DEFAULT_USER_ID) as any[];
+
+  const contentHighlights = contentRows.map((r: any) => r.content.slice(0, 100));
+
+  return {
+    totalMinutes,
+    topApps: appTime.slice(0, 5).map(a => ({ app: a.app, minutes: a.minutes })),
+    activities: uniqueActivities,
+    meetings,
+    contentHighlights,
   };
 }
 

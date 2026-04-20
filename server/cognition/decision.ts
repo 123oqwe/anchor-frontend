@@ -20,6 +20,7 @@ import { type DecisionPacket, type ContextPacket, type StageTrace } from "./pack
 import { shouldActivateSwarm, runSwarm } from "./swarm.js";
 import { detectSkillMatch, buildSkillBasedPlan } from "./skills.js";
 import { getPromptAdaptations } from "./evolution.js";
+import { generateActivitySummary } from "../integrations/local/activity-monitor.js";
 
 // ── Decision cache (LRU, 50 entries, 5min TTL) ────────────────────────────
 const CACHE_MAX = 50;
@@ -185,7 +186,30 @@ function buildSystemPrompt(userMessage: string): string {
 
   // Append evolution-based prompt adaptations
   const adaptations = getPromptAdaptations();
-  return base + adaptations;
+
+  // Inject recent activity context (Littlebird-inspired)
+  let activityContext = "";
+  try {
+    const summary = generateActivitySummary(2); // last 2 hours
+    if (summary.totalMinutes > 0) {
+      const lines: string[] = ["\n\nRECENT ACTIVITY (last 2 hours — what user has been doing):"];
+      if (summary.topApps.length > 0) {
+        lines.push("Apps: " + summary.topApps.map(a => `${a.app}(${a.minutes}min)`).join(", "));
+      }
+      if (summary.activities.length > 0) {
+        lines.push("Recent: " + summary.activities.slice(0, 5).map(a => `${a.app}: ${a.detail}`).join(" | "));
+      }
+      if (summary.meetings.length > 0) {
+        lines.push("Meetings: " + summary.meetings.map(m => `${m.title}(${m.duration}min)`).join(", "));
+      }
+      if (summary.contentHighlights.length > 0) {
+        lines.push("Working on: " + summary.contentHighlights.slice(0, 3).join(" | "));
+      }
+      activityContext = lines.join("\n");
+    }
+  } catch {}
+
+  return base + adaptations + activityContext;
 }
 
 /** Run the Decision Agent 5-stage pipeline. */

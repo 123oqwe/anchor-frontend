@@ -55,6 +55,7 @@ export default function Dashboard() {
   const [evolution, setEvolution] = useState<any[]>([]);
   const [recommendations, setRecommendations] = useState<any[]>([]);
   const [diagnostic, setDiagnostic] = useState<any>(null);
+  const [activitySummary, setActivitySummary] = useState<any>(null);
   const { fetchGraph, fetchDecision, fetchDigest } = useAnchorStore();
 
   useEffect(() => {
@@ -69,7 +70,8 @@ export default function Dashboard() {
       api.getEvolutionState().catch(() => []),
       api.getRecommendations().catch(() => []),
       api.getDiagnosticReport().catch(() => null),
-    ]).then(([dec, st, port, graph, dig, decay, twin, evo, recs, diag]) => {
+      api.getActivitySummary(24).catch(() => null),
+    ]).then(([dec, st, port, graph, dig, decay, twin, evo, recs, diag, actSum]) => {
       setDecision(dec);
       setState(st);
       setPortrait(port);
@@ -82,6 +84,7 @@ export default function Dashboard() {
       setEvolution(evo ?? []);
       setRecommendations(recs ?? []);
       setDiagnostic(diag);
+      setActivitySummary(actSum);
     }).finally(() => setLoading(false));
   }, []);
 
@@ -399,6 +402,36 @@ export default function Dashboard() {
                   </div>
                 );
               })}
+            </div>
+          </motion.div>
+        )}
+
+        {/* ── What I Did Today ──────────────────────────────── */}
+        {activitySummary && activitySummary.totalMinutes > 0 && (
+          <motion.div {...fade} transition={{ delay: 0.53, duration: 0.5 }} className="mt-10">
+            <h2 className="text-xs font-medium text-muted-foreground/60 tracking-widest uppercase mb-4">What I Did Today</h2>
+            <div className="glass rounded-xl p-5 space-y-3">
+              <div className="flex items-center gap-4 text-xs">
+                <span className="text-foreground font-medium">{Math.round(activitySummary.totalMinutes / 60)}h {activitySummary.totalMinutes % 60}m screen time</span>
+                {activitySummary.meetings?.length > 0 && (
+                  <span className="text-amber-400">{activitySummary.meetings.length} meeting{activitySummary.meetings.length > 1 ? "s" : ""}</span>
+                )}
+              </div>
+              {activitySummary.topApps?.slice(0, 4).map((a: any) => (
+                <div key={a.app} className="flex items-center gap-2 text-xs">
+                  <div className="w-20 h-1.5 rounded-full bg-white/5 overflow-hidden">
+                    <div className="h-full rounded-full bg-primary" style={{ width: `${Math.min(100, (a.minutes / (activitySummary.totalMinutes || 1)) * 100)}%` }} />
+                  </div>
+                  <span className="text-muted-foreground flex-1">{a.app}</span>
+                  <span className="text-[10px] text-muted-foreground/40 font-mono">{a.minutes}min</span>
+                </div>
+              ))}
+              {activitySummary.activities?.slice(0, 3).map((a: any, i: number) => (
+                <div key={i} className="text-[10px] text-muted-foreground truncate">
+                  <span className="text-muted-foreground/40 font-mono mr-2">{a.time}</span>
+                  {a.app}: {a.detail}
+                </div>
+              ))}
             </div>
           </motion.div>
         )}
