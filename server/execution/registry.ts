@@ -45,6 +45,8 @@ export interface ExecutionContext {
   previousResults: { toolName: string; output: string; data?: any }[];
   stepIndex: number;
   totalSteps: number;
+  agentId?: string;     // OPT-5: identifies which custom agent is calling (for KV scoping)
+  runId?: string;       // OPT-4: trace correlation across tools+LLM calls
 }
 
 // ── Registry ────────────────────────────────────────────────────────────────

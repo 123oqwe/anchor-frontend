@@ -160,6 +160,8 @@ export const api = {
   runCustomAgent: (id: string, message: string) => req<any>("POST", `/api/agents/custom/${id}/run`, { message }),
   feedbackCustomAgent: (id: string, rating: "good" | "bad", context?: string) => req("POST", `/api/agents/custom/${id}/feedback`, { rating, context }),
   generateAgentFromDescription: (description: string) => req<any>("POST", "/api/agents/custom/from-description", { description }),
+  exportCustomAgent: (id: string) => req<any>("GET", `/api/agents/custom/${id}/export`),
+  importCustomAgent: (data: any) => req<any>("POST", "/api/agents/custom/import", data),
   generateCronFromDescription: (description: string) => req<any>("POST", "/api/crons/from-description", { description }),
 
   // Crons

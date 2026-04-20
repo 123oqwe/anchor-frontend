@@ -439,6 +439,15 @@ db.exec(`
     fixes_applied_json TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
+
+  -- Per-agent persistent KV store (OPT-5: agent state across runs)
+  CREATE TABLE IF NOT EXISTS agent_kv (
+    agent_id TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (agent_id, key)
+  );
 `);
 
 // ─── Default user seed ────────────────────────────────────────────────────────

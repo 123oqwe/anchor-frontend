@@ -364,5 +364,54 @@ end tell`;
     },
   });
 
-  console.log(`[Execution] 10 tools registered (3 DB + 4 shell + 2 network + 1 code)`);
+  // ═══ Agent State KV (OPT-5) ═══════════════════════════════════════════
+
+  registerTool({
+    name: "agent_state_get",
+    description: "Get a persistent value stored by this agent (survives across runs). Only callable from custom agents.",
+    handler: "db",
+    actionClass: "read_memory",
+    inputSchema: {
+      type: "object",
+      properties: { key: { type: "string", description: "Key to look up" } },
+      required: ["key"],
+    },
+    execute: (input, ctx): ToolResult => {
+      const agentId = ctx?.agentId;
+      if (!agentId) return { success: false, output: "agent_state_get only callable from custom agents", error: "NO_AGENT_CONTEXT" };
+      const row = db.prepare("SELECT value FROM agent_kv WHERE agent_id=? AND key=?").get(agentId, input.key) as any;
+      return { success: true, output: row?.value ?? "null", data: { value: row?.value ?? null } };
+    },
+  });
+
+  registerTool({
+    name: "agent_state_set",
+    description: "Store a persistent value for this agent (survives across runs). Max 100 keys per agent, 10KB per value.",
+    handler: "db",
+    actionClass: "write_memory",
+    inputSchema: {
+      type: "object",
+      properties: {
+        key: { type: "string", description: "Key to store under" },
+        value: { type: "string", description: "Value to store (max 10KB)" },
+      },
+      required: ["key", "value"],
+    },
+    execute: (input, ctx): ToolResult => {
+      const agentId = ctx?.agentId;
+      if (!agentId) return { success: false, output: "agent_state_set only callable from custom agents", error: "NO_AGENT_CONTEXT" };
+      if (input.value.length > 10240) return { success: false, output: "Value exceeds 10KB limit", error: "VALUE_TOO_LARGE" };
+
+      // Capacity check: 100 keys per agent
+      const count = (db.prepare("SELECT COUNT(*) as c FROM agent_kv WHERE agent_id=?").get(agentId) as any)?.c ?? 0;
+      const exists = db.prepare("SELECT 1 FROM agent_kv WHERE agent_id=? AND key=?").get(agentId, input.key);
+      if (!exists && count >= 100) return { success: false, output: "Agent has reached 100 key limit", error: "KEY_LIMIT_EXCEEDED" };
+
+      db.prepare("INSERT OR REPLACE INTO agent_kv (agent_id, key, value, updated_at) VALUES (?,?,?,datetime('now'))")
+        .run(agentId, input.key, input.value);
+      return { success: true, output: `Stored ${input.key} (${input.value.length} bytes)` };
+    },
+  });
+
+  console.log(`[Execution] 12 tools registered (3 DB + 4 shell + 2 network + 1 code + 2 agent_state)`);
 }

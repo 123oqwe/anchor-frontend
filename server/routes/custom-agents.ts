@@ -190,4 +190,69 @@ If the user mentions a recurring schedule (weekly, daily, etc), suggest a cron s
   }
 });
 
+// ── OPT-6: Agent Export / Import ───────────────────────────────────────────
+
+// Export a custom agent as JSON (portable definition)
+router.get("/custom/:id/export", (req, res) => {
+  const agent = db.prepare("SELECT * FROM user_agents WHERE id=? AND user_id=?").get(req.params.id, DEFAULT_USER_ID) as any;
+  if (!agent) return res.status(404).json({ error: "Agent not found" });
+
+  const kvRows = db.prepare("SELECT key, value FROM agent_kv WHERE agent_id=?").all(agent.id) as any[];
+  const stateSchema = kvRows.map((r: any) => ({ key: r.key, type: typeof JSON.parse(r.value) === "object" ? "json" : "string" }));
+
+  res.json({
+    version: "1.0",
+    kind: "anchor_custom_agent",
+    exportedAt: new Date().toISOString(),
+    agent: {
+      name: agent.name,
+      instructions: agent.instructions,
+      tools: JSON.parse(agent.tools),
+      trigger_type: agent.trigger_type,
+      trigger_config: JSON.parse(agent.trigger_config),
+      model_preference: agent.model_preference,
+    },
+    state_schema: stateSchema,
+  });
+});
+
+// Import a custom agent from JSON (with validation and name collision handling)
+router.post("/custom/import", (req, res) => {
+  const data = req.body;
+
+  // Schema validation
+  if (!data || data.kind !== "anchor_custom_agent") return res.status(400).json({ error: "Invalid format — expected anchor_custom_agent" });
+  if (!data.agent || typeof data.agent.name !== "string" || typeof data.agent.instructions !== "string") {
+    return res.status(400).json({ error: "Missing name or instructions" });
+  }
+  if (data.agent.name.length > 100 || data.agent.instructions.length > 10000) {
+    return res.status(400).json({ error: "Name or instructions too long" });
+  }
+
+  // Name collision handling — auto-suffix if exists
+  let finalName = data.agent.name;
+  let suffix = 1;
+  while (db.prepare("SELECT 1 FROM user_agents WHERE user_id=? AND name=?").get(DEFAULT_USER_ID, finalName)) {
+    suffix++;
+    finalName = `${data.agent.name} (${suffix})`;
+    if (suffix > 100) return res.status(400).json({ error: "Too many collisions" });
+  }
+
+  const id = nanoid();
+  db.prepare("INSERT INTO user_agents (id, user_id, name, instructions, tools, trigger_type, trigger_config, model_preference) VALUES (?,?,?,?,?,?,?,?)")
+    .run(
+      id,
+      DEFAULT_USER_ID,
+      finalName,
+      data.agent.instructions,
+      JSON.stringify(Array.isArray(data.agent.tools) ? data.agent.tools : []),
+      typeof data.agent.trigger_type === "string" ? data.agent.trigger_type : "manual",
+      JSON.stringify(data.agent.trigger_config ?? {}),
+      data.agent.model_preference ?? null
+    );
+
+  logExecution("Custom Agent", `Imported: ${finalName}`);
+  res.json({ ok: true, id, name: finalName, renamed: finalName !== data.agent.name });
+});
+
 export default router;
