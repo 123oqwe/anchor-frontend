@@ -4,7 +4,7 @@
  */
 import { useState, useEffect } from "react";
 import { useRoute, useLocation } from "wouter";
-import { Loader2, ArrowLeft, Zap, Bot, DollarSign, Clock } from "lucide-react";
+import { Loader2, ArrowLeft, Bot, DollarSign, Clock, Terminal, Zap as ZapIcon } from "lucide-react";
 import { api } from "@/lib/api";
 
 export default function RunTrace() {
@@ -43,6 +43,9 @@ export default function RunTrace() {
           <span>{trace.totalTokens} tokens</span>
           <span>{trace.llmCount} LLM calls</span>
           <span>{trace.toolCount} tool calls</span>
+          {typeof trace.providerCount === "number" && (
+            <span>{trace.providerCount} bridge attempts</span>
+          )}
         </div>
       </div>
 
@@ -54,8 +57,13 @@ export default function RunTrace() {
               <span className="text-muted-foreground/50 font-mono w-20 shrink-0">
                 {event.ts?.slice(11, 19)}
               </span>
-              <span className={`w-12 shrink-0 ${event.type === "llm" ? "text-purple-400" : "text-emerald-400"}`}>
-                {event.type === "llm" ? "LLM" : "TOOL"}
+              <span className={`w-16 shrink-0 flex items-center gap-1 ${
+                event.type === "llm" ? "text-purple-400"
+                  : event.type === "provider" ? "text-cyan-400"
+                  : "text-emerald-400"
+              }`}>
+                {event.type === "provider" && (event.provider_id?.includes("mcp") ? <ZapIcon className="h-3 w-3" /> : <Terminal className="h-3 w-3" />)}
+                {event.type === "llm" ? "LLM" : event.type === "provider" ? "BRIDGE" : "TOOL"}
               </span>
               {event.type === "llm" ? (
                 <div className="flex-1 min-w-0">
@@ -68,6 +76,19 @@ export default function RunTrace() {
                   {event.response_preview && (
                     <p className="text-muted-foreground mt-1 line-clamp-2">{event.response_preview}</p>
                   )}
+                </div>
+              ) : event.type === "provider" ? (
+                <div className="flex-1 min-w-0">
+                  <div className="flex gap-2 items-center">
+                    <span className="text-foreground font-mono text-[11px]">{event.capability}</span>
+                    <span className="text-cyan-400 font-mono text-[11px]">→ {event.provider_id}</span>
+                    <span className={event.status === "success" ? "text-emerald-400" : event.status === "skipped" ? "text-muted-foreground" : "text-red-400"}>
+                      {event.status}
+                    </span>
+                    <span className="text-muted-foreground">{event.latency_ms}ms</span>
+                    {event.error_kind && <span className="text-[10px] px-1 rounded bg-red-500/10 text-red-400 font-mono">{event.error_kind}</span>}
+                  </div>
+                  {event.reason && <p className="text-muted-foreground mt-0.5 line-clamp-1 text-[11px]">{event.reason}</p>}
                 </div>
               ) : (
                 <div className="flex-1 min-w-0">

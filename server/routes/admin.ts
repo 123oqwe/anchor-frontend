@@ -313,7 +313,12 @@ router.get("/runs/:runId/trace", (req, res) => {
     "SELECT id, task, model_id, provider_id, input_tokens, output_tokens, cost_usd, latency_ms, status, request_preview, response_preview, created_at FROM llm_calls WHERE run_id=? ORDER BY created_at"
   ).all(runId) as any[];
 
-  if (toolCalls.length === 0 && llmCalls.length === 0) {
+  // L8-Hand bridge: provider attempts (which bridge provider handled each capability call)
+  const providerAttempts = db.prepare(
+    "SELECT id, capability, provider_id, status, error_kind, reason, latency_ms, created_at FROM provider_attempts WHERE run_id=? ORDER BY created_at"
+  ).all(runId) as any[];
+
+  if (toolCalls.length === 0 && llmCalls.length === 0 && providerAttempts.length === 0) {
     return res.status(404).json({ error: "Run not found" });
   }
 
@@ -321,6 +326,7 @@ router.get("/runs/:runId/trace", (req, res) => {
   const timeline = [
     ...toolCalls.map((t: any) => ({ type: "tool", ...t, ts: t.created_at })),
     ...llmCalls.map((l: any) => ({ type: "llm", ...l, ts: l.created_at })),
+    ...providerAttempts.map((p: any) => ({ type: "provider", ...p, ts: p.created_at })),
   ].sort((a: any, b: any) => a.ts.localeCompare(b.ts));
 
   const totalCost = llmCalls.reduce((s: number, l: any) => s + (l.cost_usd ?? 0), 0);
@@ -341,6 +347,7 @@ router.get("/runs/:runId/trace", (req, res) => {
     totalTokens,
     toolCount: toolCalls.length,
     llmCount: llmCalls.length,
+    providerCount: providerAttempts.length,
     timeline,
   });
 });

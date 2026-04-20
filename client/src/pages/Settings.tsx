@@ -23,6 +23,7 @@ import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
+import { BridgesPanel } from "@/components/BridgesPanel";
 
 const settingSections = [
   { id: "profile", label: "Profile", icon: User },
@@ -650,6 +651,9 @@ export default function Settings() {
                   </button>
                   <p className="text-[10px] text-muted-foreground mt-2">Finance domain = only real money. Courses like "Valuation Study" belong in Work.</p>
                 </div>
+
+                {/* L8-Hand Bridge — capability/provider dispatch + health */}
+                <BridgesPanel />
 
                 {/* Future integrations */}
                 <div className="glass rounded-xl p-6">

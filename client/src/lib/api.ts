@@ -171,6 +171,15 @@ export const api = {
   getProposalDetail: (id: string) => req<any>("GET", `/api/agents/proposals/${id}`),
   approveProposal: (id: string) => req<any>("POST", `/api/agents/proposals/${id}/approve`, {}),
   rejectProposal: (id: string) => req("POST", `/api/agents/proposals/${id}/reject`, {}),
+
+  // L8-Hand Bridge: capabilities + providers + preferences
+  getBridgeCapabilities: () => req<any[]>("GET", "/api/bridges/capabilities"),
+  getBridgeProviders: () => req<any[]>("GET", "/api/bridges/providers"),
+  getBridgePreferences: () => req<Record<string, { order: string[]; disabled: string[] }>>("GET", "/api/bridges/preferences"),
+  setBridgePreference: (capability: string, order: string[], disabled: string[] = []) =>
+    req("POST", "/api/bridges/preferences", { capability, order, disabled }),
+  getBridgeAttempts: (runId?: string) =>
+    req<any[]>("GET", runId ? `/api/bridges/attempts?runId=${runId}` : "/api/bridges/attempts"),
   getPipelines: () => req<any[]>("GET", "/api/agents/pipelines"),
   createPipeline: (data: any) => req<any>("POST", "/api/agents/pipelines", data),
   runPipeline: (id: string, input: string) => req<any>("POST", `/api/agents/pipelines/${id}/run`, { input }),
