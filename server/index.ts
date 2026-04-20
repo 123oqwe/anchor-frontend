@@ -37,6 +37,7 @@ import notificationsRoutes from "./routes/notifications.js";
 import cronsRoutes from "./routes/crons.js";
 import customAgentsRoutes from "./routes/custom-agents.js";
 import mcpRoutes from "./routes/mcp.js";
+import proposalsRoutes from "./routes/proposals.js";
 import imessageRoutes from "./integrations/imessage.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -55,6 +56,7 @@ async function startServer() {
   app.use("/api/memory", memoryRoutes);
   app.use("/api/workspace", workspaceRoutes);
   app.use("/api/twin", twinRoutes);
+  app.use("/api/agents/proposals", proposalsRoutes);
   app.use("/api/agents", agentsRoutes);
   app.use("/api/advisor", advisorRoutes);
   app.use("/api/admin", adminRoutes);

@@ -44,6 +44,13 @@ export function useWebSocket() {
             toast.success(`Execution complete: ${ok}/${steps.length} steps done`);
           } else if (data.type === "TWIN_UPDATED") {
             toast("Twin learned something new", { description: data.payload?.insight?.slice(0, 80), duration: 4000 });
+          } else if (data.type === "PROPOSAL_PENDING") {
+            const p = data.payload;
+            toast("File change proposed — review required", {
+              description: `${p.agentName ?? "An agent"} wants to write ${p.path ?? "(unknown)"} (${p.deltaLines >= 0 ? "+" : ""}${p.deltaLines} lines)`,
+              duration: 15000,
+              action: { label: "Review", onClick: () => { window.location.href = "/agents"; } },
+            });
           }
         } catch {}
       };

@@ -474,6 +474,24 @@ db.exec(`
   );
 
   CREATE INDEX IF NOT EXISTS idx_pipeline_runs ON pipeline_runs(pipeline_id, started_at);
+
+  -- OPT-1 Gap B: dev tool write proposals (human-in-loop approval)
+  CREATE TABLE IF NOT EXISTS dev_proposals (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    kind TEXT NOT NULL,                        -- 'write_file' | 'git_commit'
+    path TEXT,                                 -- absolute file path (for write_file)
+    before_content TEXT,                       -- existing content (null if new file)
+    after_content TEXT NOT NULL,               -- proposed content
+    agent_name TEXT,                           -- which agent proposed (audit)
+    run_id TEXT,                               -- trace correlation
+    status TEXT NOT NULL DEFAULT 'pending',    -- pending | approved | rejected | expired | written
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    reviewed_at TEXT,
+    write_result TEXT                          -- 'ok' or error message once written
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_dev_proposals_status ON dev_proposals(user_id, status, created_at);
 `);
 
 // ─── Default user seed ────────────────────────────────────────────────────────

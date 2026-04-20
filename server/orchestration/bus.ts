@@ -29,7 +29,9 @@ export type AnchorEvent =
   | { type: "CALENDAR_UPCOMING"; payload: { title: string; startsInMinutes: number } }
   | { type: "NODE_STATUS_CHANGED"; payload: { nodeId: string; label: string; from: string; to: string } }
   | { type: "APP_FOCUSED"; payload: { app: string; previous: string } }
-  | { type: "IDLE_DETECTED"; payload: { idleMinutes: number } };
+  | { type: "IDLE_DETECTED"; payload: { idleMinutes: number } }
+  // OPT-1 Gap B: dev tool write proposal awaiting user approval
+  | { type: "PROPOSAL_PENDING"; payload: { id: string; kind: string; path?: string; agentName?: string; deltaLines: number } };
 
 class AnchorBus extends EventEmitter {
   publish(data: AnchorEvent) {

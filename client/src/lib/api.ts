@@ -165,6 +165,12 @@ export const api = {
   generateAgentFromDescription: (description: string) => req<any>("POST", "/api/agents/custom/from-description", { description }),
   exportCustomAgent: (id: string) => req<any>("GET", `/api/agents/custom/${id}/export`),
   importCustomAgent: (data: any) => req<any>("POST", "/api/agents/custom/import", data),
+
+  // Dev proposals (agent-proposed file writes awaiting human approval)
+  getProposals: () => req<any[]>("GET", "/api/agents/proposals"),
+  getProposalDetail: (id: string) => req<any>("GET", `/api/agents/proposals/${id}`),
+  approveProposal: (id: string) => req<any>("POST", `/api/agents/proposals/${id}/approve`, {}),
+  rejectProposal: (id: string) => req("POST", `/api/agents/proposals/${id}/reject`, {}),
   getPipelines: () => req<any[]>("GET", "/api/agents/pipelines"),
   createPipeline: (data: any) => req<any>("POST", "/api/agents/pipelines", data),
   runPipeline: (id: string, input: string) => req<any>("POST", `/api/agents/pipelines/${id}/run`, { input }),

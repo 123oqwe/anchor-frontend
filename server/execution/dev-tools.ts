@@ -15,7 +15,10 @@ import { promisify } from "util";
 import fs from "fs";
 import path from "path";
 import os from "os";
+import { nanoid } from "nanoid";
 import { registerTool, type ToolResult } from "./registry.js";
+import { db, DEFAULT_USER_ID } from "../infra/storage/db.js";
+import { bus } from "../orchestration/bus.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -81,47 +84,50 @@ function safeShellCheck(command: string, args: string[]): { ok: true } | { ok: f
   return { ok: true };
 }
 
-// ── Proposed change storage (propose + approve pattern) ─────────────────────
+// ── Proposed change storage (persistent; requires user approval via HTTP) ───
 
-interface ProposedChange {
-  id: string;
-  type: "write_file" | "git_commit";
+const PROPOSAL_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
+function expireOldProposals(): void {
+  // Mark anything pending past TTL as expired
+  db.prepare(
+    `UPDATE dev_proposals SET status='expired'
+     WHERE status='pending'
+     AND datetime(created_at) <= datetime('now', ?)`
+  ).run(`-${Math.floor(PROPOSAL_TTL_MS / 1000)} seconds`);
+}
+
+function createProposal(details: {
+  kind: "write_file" | "git_commit";
   path?: string;
   before?: string;
   after: string;
-  createdAt: number;
-}
-
-const proposedChanges = new Map<string, ProposedChange>();
-const PROPOSAL_TTL_MS = 10 * 60 * 1000; // 10 minutes
-
-function createProposal(type: "write_file" | "git_commit", details: Partial<ProposedChange>): string {
-  const id = `proposal_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  proposedChanges.set(id, {
+  agentName?: string;
+  runId?: string;
+}): string {
+  expireOldProposals();
+  const id = `proposal_${nanoid(8)}`;
+  db.prepare(
+    `INSERT INTO dev_proposals (id, user_id, kind, path, before_content, after_content, agent_name, run_id, status)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')`
+  ).run(
     id,
-    type,
-    after: "",
-    ...details,
-    createdAt: Date.now(),
-  } as ProposedChange);
-  // Cleanup expired proposals
-  const expiredKeys: string[] = [];
-  proposedChanges.forEach((p, pid) => {
-    if (Date.now() - p.createdAt > PROPOSAL_TTL_MS) expiredKeys.push(pid);
-  });
-  expiredKeys.forEach(k => proposedChanges.delete(k));
+    DEFAULT_USER_ID,
+    details.kind,
+    details.path ?? null,
+    details.before ?? null,
+    details.after,
+    details.agentName ?? null,
+    details.runId ?? null,
+  );
   return id;
 }
 
-function consumeProposal(id: string): ProposedChange | null {
-  const p = proposedChanges.get(id);
-  if (!p) return null;
-  if (Date.now() - p.createdAt > PROPOSAL_TTL_MS) {
-    proposedChanges.delete(id);
-    return null;
-  }
-  proposedChanges.delete(id);
-  return p;
+function getProposal(id: string): { id: string; kind: string; path: string | null; before_content: string | null; after_content: string; status: string; agent_name: string | null } | null {
+  const row = db.prepare(
+    "SELECT id, kind, path, before_content, after_content, status, agent_name FROM dev_proposals WHERE id=? AND user_id=?"
+  ).get(id, DEFAULT_USER_ID) as any;
+  return row ?? null;
 }
 
 // ── Register Developer Tools ────────────────────────────────────────────────
@@ -157,7 +163,7 @@ export function registerDevTools(): void {
 
   registerTool({
     name: "diff_file",
-    description: "Show proposed diff for a file change. Returns proposal ID. Call approve_and_write with that ID to commit.",
+    description: "Propose a file change for user review. Returns proposal ID. The user must approve in the dashboard before the write happens — calling approve_and_write alone will NOT write.",
     handler: "internal",
     actionClass: "read_memory",
     inputSchema: {
@@ -168,40 +174,61 @@ export function registerDevTools(): void {
       },
       required: ["path", "proposed"],
     },
-    execute: (input): ToolResult => {
+    execute: (input, context): ToolResult => {
       const check = safePath(input.path);
       if (!check.ok) return { success: false, output: check.reason, error: "UNSAFE_PATH" };
       if (input.proposed.length > MAX_WRITE_BYTES) return { success: false, output: `Proposed content too large (max ${MAX_WRITE_BYTES})`, error: "TOO_LARGE" };
 
-      let before = "";
+      let before: string | undefined;
       try {
         before = fs.readFileSync(check.absolute, "utf-8");
       } catch {
-        before = "";  // new file
+        before = undefined;  // new file
       }
 
-      const proposalId = createProposal("write_file", {
+      // Resolve a friendly agent label from context (OPT-4 agentName isn't on ExecutionContext — look up by runId if needed)
+      let agentName: string | undefined;
+      if (context?.runId) {
+        const row = db.prepare("SELECT agent_name FROM llm_calls WHERE run_id=? AND agent_name IS NOT NULL LIMIT 1").get(context.runId) as any;
+        agentName = row?.agent_name;
+      }
+
+      const proposalId = createProposal({
+        kind: "write_file",
         path: check.absolute,
         before,
         after: input.proposed,
+        agentName,
+        runId: context?.runId,
       });
 
-      // Simple diff summary (line counts)
-      const beforeLines = before.split("\n").length;
+      const beforeLines = (before ?? "").split("\n").length;
       const afterLines = input.proposed.split("\n").length;
       const delta = afterLines - beforeLines;
 
+      // Notify the frontend — user should review in Proposals dashboard
+      bus.publish({
+        type: "PROPOSAL_PENDING",
+        payload: {
+          id: proposalId,
+          kind: "write_file",
+          path: check.absolute,
+          agentName,
+          deltaLines: delta,
+        },
+      });
+
       return {
         success: true,
-        output: `Proposal ${proposalId} created. Diff: ${beforeLines} → ${afterLines} lines (${delta >= 0 ? "+" : ""}${delta}).\nCall approve_and_write with proposal_id to commit.`,
-        data: { proposalId, beforeLines, afterLines, delta, path: check.absolute },
+        output: `Proposal ${proposalId} created (awaiting user review). Diff: ${beforeLines} → ${afterLines} lines (${delta >= 0 ? "+" : ""}${delta}).\n\nThe user will review in the dashboard. You do NOT need to call approve_and_write — the user approves directly via the UI. If asked to follow up, check back later to see if the proposal was approved.`,
+        data: { proposalId, beforeLines, afterLines, delta, path: check.absolute, status: "pending" },
       };
     },
   });
 
   registerTool({
     name: "approve_and_write",
-    description: "Commit a previously proposed file change (from diff_file). Proposal expires in 10 minutes.",
+    description: "DEPRECATED: File writes require explicit user approval via the dashboard. This tool only CHECKS if a proposal was approved by the user — it cannot approve on the user's behalf. If status is still 'pending', inform the user to review in Settings → Proposals.",
     handler: "internal",
     actionClass: "execute_command",
     inputSchema: {
@@ -210,29 +237,28 @@ export function registerDevTools(): void {
       required: ["proposal_id"],
     },
     execute: (input): ToolResult => {
-      const proposal = consumeProposal(input.proposal_id);
-      if (!proposal) return { success: false, output: "Proposal not found or expired", error: "NO_PROPOSAL" };
-      if (proposal.type !== "write_file" || !proposal.path) return { success: false, output: "Wrong proposal type", error: "BAD_PROPOSAL" };
+      const proposal = getProposal(input.proposal_id);
+      if (!proposal) return { success: false, output: "Proposal not found", error: "NO_PROPOSAL" };
 
-      try {
-        // Ensure parent directory exists
-        fs.mkdirSync(path.dirname(proposal.path), { recursive: true });
-        fs.writeFileSync(proposal.path, proposal.after, "utf-8");
+      // Only report status — agent cannot bypass human approval
+      if (proposal.status === "pending") {
         return {
-          success: true,
-          output: `Wrote ${proposal.after.length} bytes to ${proposal.path}`,
-          data: { path: proposal.path, bytes: proposal.after.length },
-          rollback: () => {
-            if (proposal.before !== undefined) {
-              fs.writeFileSync(proposal.path!, proposal.before, "utf-8");
-            } else {
-              fs.unlinkSync(proposal.path!);
-            }
-          },
+          success: false,
+          output: `Proposal ${proposal.id} is still awaiting user review. The write has NOT happened. Inform the user to open Settings → Proposals and approve or reject.`,
+          error: "AWAITING_APPROVAL",
+          data: { status: "pending" },
         };
-      } catch (err: any) {
-        return { success: false, output: `Write failed: ${err.message}`, error: err.code ?? "WRITE_ERROR" };
       }
+      if (proposal.status === "rejected") {
+        return { success: false, output: `Proposal ${proposal.id} was rejected by the user.`, error: "REJECTED", data: { status: "rejected" } };
+      }
+      if (proposal.status === "expired") {
+        return { success: false, output: `Proposal ${proposal.id} expired (>10 min old). Re-create with diff_file.`, error: "EXPIRED", data: { status: "expired" } };
+      }
+      if (proposal.status === "written" || proposal.status === "approved") {
+        return { success: true, output: `Proposal ${proposal.id} was approved and written to ${proposal.path}.`, data: { status: proposal.status, path: proposal.path } };
+      }
+      return { success: false, output: `Unknown proposal status: ${proposal.status}`, error: "UNKNOWN_STATUS" };
     },
   });
 
