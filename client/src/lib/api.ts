@@ -157,6 +157,19 @@ export const api = {
   installAgentTemplate: (templateIndex: number) => req<any>("POST", "/api/agents/custom/install-template", { templateIndex }),
   runCustomAgent: (id: string, message: string) => req<any>("POST", `/api/agents/custom/${id}/run`, { message }),
   feedbackCustomAgent: (id: string, rating: "good" | "bad", context?: string) => req("POST", `/api/agents/custom/${id}/feedback`, { rating, context }),
+  generateAgentFromDescription: (description: string) => req<any>("POST", "/api/agents/custom/from-description", { description }),
+  generateCronFromDescription: (description: string) => req<any>("POST", "/api/crons/from-description", { description }),
+
+  // Crons
+  getCrons: () => req<any[]>("GET", "/api/crons"),
+  createCron: (data: any) => req<any>("POST", "/api/crons", data),
+  deleteCron: (id: string) => req("DELETE", `/api/crons/${id}`),
+  toggleCron: (id: string) => req("POST", `/api/crons/${id}/toggle`, {}),
+
+  // Skills
+  getSkills: () => req<any[]>("GET", "/api/skills"),
+  getSkillTemplates: () => req<any[]>("GET", "/api/skills/templates"),
+  installSkillTemplate: (index: number) => req<any>("POST", "/api/skills/install-template", { templateIndex: index }),
 
   // Integrations — Google OAuth
   getIntegrationStatus: () => req<any>("GET", "/api/integrations/status"),

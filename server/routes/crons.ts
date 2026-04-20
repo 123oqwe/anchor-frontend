@@ -41,4 +41,41 @@ router.post("/:id/toggle", (req, res) => {
   res.json({ ok: true, enabled: !!cron?.enabled });
 });
 
+// Natural language automation creation
+router.post("/from-description", async (req, res) => {
+  const { description } = req.body;
+  if (!description) return res.status(400).json({ error: "description required" });
+
+  try {
+    const { text: llmText } = await import("../infra/compute/index.js");
+    const result = await llmText({
+      task: "twin_edit_learning",
+      system: `Convert a natural language description into a cron job config.
+Respond ONLY with JSON:
+{
+  "name": "Short name",
+  "cron_pattern": "valid cron expression",
+  "human_schedule": "e.g. Every Monday at 9am",
+  "action_type": "remind",
+  "action_config": { "message": "what to remind" }
+}
+
+Common patterns: "0 9 * * *" (daily 9am), "0 9 * * 1" (Monday 9am), "0 18 * * 5" (Friday 6pm), "0 */2 * * *" (every 2h)`,
+      messages: [{ role: "user", content: description }],
+      maxTokens: 200,
+    });
+
+    const stripped = result.replace(/```json\s*/g, "").replace(/```/g, "");
+    const parsed = JSON.parse(stripped.match(/\{[\s\S]*\}/)?.[0] ?? "{}");
+
+    if (!parsed.name || !parsed.cron_pattern) {
+      return res.status(400).json({ error: "Could not parse automation config" });
+    }
+
+    res.json(parsed);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 export default router;

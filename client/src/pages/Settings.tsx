@@ -18,8 +18,6 @@ import {
   Loader2,
   Check,
   AlertCircle,
-  ThumbsUp,
-  ThumbsDown,
 } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
@@ -37,87 +35,6 @@ const settingSections = [
   { id: "api", label: "API Keys", icon: Key },
 ];
 
-/** Automations list — user's custom crons */
-function AutomationsList() {
-  const [crons, setCrons] = useState<any[]>([]);
-  const [name, setName] = useState("");
-  const [pattern, setPattern] = useState("0 9 * * *");
-  useEffect(() => { fetch("/api/crons").then(r => r.json()).then(setCrons).catch(() => {}); }, []);
-
-  return (
-    <div className="space-y-2">
-      {crons.map((c: any) => (
-        <div key={c.id} className="flex items-center gap-2 text-xs glass rounded-lg px-3 py-2">
-          <span className={`w-2 h-2 rounded-full ${c.enabled ? "bg-emerald-400" : "bg-muted-foreground/30"}`} />
-          <span className="text-foreground flex-1">{c.name}</span>
-          <span className="text-[10px] text-muted-foreground font-mono">{c.cron_pattern}</span>
-          <button onClick={async () => {
-            await fetch(`/api/crons/${c.id}/toggle`, { method: "POST" });
-            setCrons(await fetch("/api/crons").then(r => r.json()));
-          }} className="text-[10px] text-primary">
-            {c.enabled ? "Pause" : "Enable"}
-          </button>
-          <button onClick={async () => {
-            await fetch(`/api/crons/${c.id}`, { method: "DELETE" });
-            setCrons(crons.filter(x => x.id !== c.id));
-          }} className="text-[10px] text-red-400">×</button>
-        </div>
-      ))}
-      {crons.length === 0 && <p className="text-xs text-muted-foreground/40">No automations yet.</p>}
-      <div className="flex gap-2 mt-2">
-        <input value={name} onChange={e => setName(e.target.value)} placeholder="Remind me to..."
-          className="flex-1 glass rounded-lg px-3 py-1.5 text-xs text-foreground focus:outline-none" />
-        <select value={pattern} onChange={e => setPattern(e.target.value)} className="glass rounded-lg px-2 py-1.5 text-xs bg-transparent">
-          <option value="0 9 * * *">Daily 9am</option>
-          <option value="0 9 * * 1">Weekly Mon</option>
-          <option value="0 9 * * 5">Weekly Fri</option>
-          <option value="0 */6 * * *">Every 6h</option>
-        </select>
-        <button onClick={async () => {
-          if (!name.trim()) return;
-          await fetch("/api/crons", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, cron_pattern: pattern, action_type: "remind", action_config: { message: name } }) });
-          setName("");
-          setCrons(await fetch("/api/crons").then(r => r.json()));
-          toast.success("Automation created");
-        }} className="px-3 py-1.5 rounded-lg bg-primary/10 text-primary text-xs">Add</button>
-      </div>
-    </div>
-  );
-}
-
-/** Skill templates — one-click install */
-function SkillTemplates() {
-  const [templates, setTemplates] = useState<any[]>([]);
-  const [skills, setSkills] = useState<any[]>([]);
-  useEffect(() => {
-    fetch("/api/skills/templates").then(r => r.json()).then(d => Array.isArray(d) ? setTemplates(d) : null).catch(() => {});
-    fetch("/api/skills").then(r => r.json()).then(d => Array.isArray(d) ? setSkills(d) : null).catch(() => {});
-  }, []);
-  const installed = new Set(skills.map((s: any) => s.name));
-
-  return (
-    <div className="space-y-2">
-      {templates.map((t: any, i: number) => (
-        <div key={t.name} className="flex items-center gap-3 glass rounded-lg px-3 py-2.5">
-          <span className="text-primary">⚡</span>
-          <div className="flex-1">
-            <span className="text-xs font-medium text-foreground">{t.name}</span>
-            <p className="text-[10px] text-muted-foreground">{t.description}</p>
-          </div>
-          {installed.has(t.name) ? (
-            <span className="text-[10px] text-emerald-400">Installed</span>
-          ) : (
-            <button onClick={async () => {
-              await fetch("/api/skills/install-template", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ templateIndex: i }) });
-              setSkills(await fetch("/api/skills").then(r => r.json()));
-              toast.success(`${t.name} installed`);
-            }} className="px-2 py-1 rounded bg-primary/10 text-primary text-[10px]">Install</button>
-          )}
-        </div>
-      ))}
-    </div>
-  );
-}
 
 /** Activity monitor status */
 function ActivityMonitorStatus() {
@@ -149,174 +66,6 @@ function ActivityMonitorStatus() {
   );
 }
 
-/** Custom Agents — create, install templates, run */
-function CustomAgentsList() {
-  const [agents, setAgents] = useState<any[]>([]);
-  const [templates, setTemplates] = useState<any[]>([]);
-  const [showCreate, setShowCreate] = useState(false);
-  const [newName, setNewName] = useState("");
-  const [newInstructions, setNewInstructions] = useState("");
-  const [runningId, setRunningId] = useState<string | null>(null);
-  const [runInput, setRunInput] = useState("");
-  const [runResult, setRunResult] = useState<string | null>(null);
-  const [editing, setEditing] = useState<string | null>(null);
-  const [editName, setEditName] = useState("");
-  const [editInstructions, setEditInstructions] = useState("");
-
-  useEffect(() => {
-    api.getCustomAgents().then(setAgents).catch(() => {});
-    api.getAgentTemplates().then(d => Array.isArray(d) ? setTemplates(d) : null).catch(() => {});
-  }, []);
-
-  const installedNames = new Set(agents.map((a: any) => a.name));
-
-  const handleCreate = async () => {
-    if (!newName.trim() || !newInstructions.trim()) return;
-    await api.createCustomAgent({ name: newName, instructions: newInstructions, tools: [] });
-    setNewName(""); setNewInstructions(""); setShowCreate(false);
-    setAgents(await api.getCustomAgents());
-    toast.success("Agent created");
-  };
-
-  const handleRun = async (id: string) => {
-    if (!runInput.trim()) return;
-    setRunResult(null);
-    try {
-      const res = await api.runCustomAgent(id, runInput);
-      setRunResult(res.content);
-      setRunInput("");
-    } catch { toast.error("Agent execution failed"); }
-  };
-
-  const handleSaveEdit = async (id: string) => {
-    await api.updateCustomAgent(id, { name: editName, instructions: editInstructions, tools: [] });
-    setEditing(null);
-    setAgents(await api.getCustomAgents());
-    toast.success("Agent updated");
-  };
-
-  return (
-    <div className="space-y-3">
-      {/* Existing agents */}
-      {agents.map((a: any) => (
-        <div key={a.id} className="glass rounded-lg p-3">
-          {editing === a.id ? (
-            <div className="space-y-2">
-              <input value={editName} onChange={e => setEditName(e.target.value)}
-                className="w-full glass rounded-lg px-3 py-1.5 text-xs text-foreground focus:outline-none" />
-              <textarea value={editInstructions} onChange={e => setEditInstructions(e.target.value)} rows={3}
-                className="w-full glass rounded-lg px-3 py-1.5 text-xs text-foreground focus:outline-none resize-none" />
-              <div className="flex gap-2">
-                <button onClick={() => handleSaveEdit(a.id)} className="px-2 py-1 rounded bg-primary/10 text-primary text-[10px]">Save</button>
-                <button onClick={() => setEditing(null)} className="px-2 py-1 rounded text-muted-foreground text-[10px]">Cancel</button>
-              </div>
-            </div>
-          ) : (
-            <>
-              <div className="flex items-center gap-2 mb-1">
-                <span className="text-primary">🤖</span>
-                <span className="text-xs font-medium text-foreground flex-1">{a.name}</span>
-                <button onClick={() => { setEditing(a.id); setEditName(a.name); setEditInstructions(a.instructions); }}
-                  className="text-[10px] text-muted-foreground hover:text-foreground">Edit</button>
-                <button onClick={async () => {
-                  await api.deleteCustomAgent(a.id);
-                  setAgents(agents.filter(x => x.id !== a.id));
-                  toast.success("Agent deleted");
-                }} className="text-[10px] text-red-400">Delete</button>
-              </div>
-              <p className="text-[10px] text-muted-foreground mb-2 line-clamp-2">{a.instructions}</p>
-
-              {/* Run agent */}
-              {runningId === a.id ? (
-                <div className="space-y-2">
-                  <div className="flex gap-2">
-                    <input value={runInput} onChange={e => setRunInput(e.target.value)}
-                      onKeyDown={e => e.key === "Enter" && handleRun(a.id)}
-                      placeholder="Ask this agent something..."
-                      autoFocus
-                      className="flex-1 glass rounded-lg px-3 py-1.5 text-xs text-foreground focus:outline-none" />
-                    <button onClick={() => handleRun(a.id)} className="px-2 py-1.5 rounded-lg bg-primary text-primary-foreground text-[10px]">Run</button>
-                    <button onClick={() => { setRunningId(null); setRunResult(null); }} className="text-[10px] text-muted-foreground">×</button>
-                  </div>
-                  {runResult && (
-                    <div className="p-2 bg-primary/5 rounded-lg">
-                      <p className="text-xs text-muted-foreground whitespace-pre-line">{runResult}</p>
-                      <div className="flex items-center gap-2 mt-2 pt-2 border-t border-white/5">
-                        <span className="text-[10px] text-muted-foreground/40">Was this helpful?</span>
-                        <button onClick={() => { api.feedbackCustomAgent(a.id, "good", runResult.slice(0, 100)); toast.success("Thanks!"); }}
-                          className="p-1 rounded hover:bg-emerald-500/10 text-muted-foreground/40 hover:text-emerald-400 transition-colors">
-                          <ThumbsUp className="h-3 w-3" />
-                        </button>
-                        <button onClick={() => { api.feedbackCustomAgent(a.id, "bad", runResult.slice(0, 100)); toast.success("Noted — system will improve"); }}
-                          className="p-1 rounded hover:bg-red-500/10 text-muted-foreground/40 hover:text-red-400 transition-colors">
-                          <ThumbsDown className="h-3 w-3" />
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <button onClick={() => setRunningId(a.id)}
-                  className="px-2 py-1 rounded bg-primary/10 text-primary text-[10px]">Run Agent</button>
-              )}
-            </>
-          )}
-        </div>
-      ))}
-
-      {agents.length === 0 && !showCreate && (
-        <p className="text-xs text-muted-foreground/40">No custom agents yet. Create one or install a template below.</p>
-      )}
-
-      {/* Create new agent */}
-      {showCreate ? (
-        <div className="glass rounded-lg p-3 space-y-2 border border-primary/20">
-          <input value={newName} onChange={e => setNewName(e.target.value)}
-            placeholder="Agent name (e.g. Competitor Analyst)"
-            className="w-full glass rounded-lg px-3 py-1.5 text-xs text-foreground focus:outline-none" />
-          <textarea value={newInstructions} onChange={e => setNewInstructions(e.target.value)}
-            placeholder="Instructions — tell this agent who it is and what it does..."
-            rows={4}
-            className="w-full glass rounded-lg px-3 py-1.5 text-xs text-foreground focus:outline-none resize-none" />
-          <div className="flex gap-2">
-            <button onClick={handleCreate} className="px-3 py-1.5 rounded-lg bg-primary text-primary-foreground text-xs">Create</button>
-            <button onClick={() => setShowCreate(false)} className="px-3 py-1.5 rounded-lg text-muted-foreground text-xs">Cancel</button>
-          </div>
-        </div>
-      ) : (
-        <button onClick={() => setShowCreate(true)}
-          className="w-full glass rounded-lg px-3 py-2 text-xs text-primary hover:bg-primary/5 transition-colors text-left">
-          + Create Custom Agent
-        </button>
-      )}
-
-      {/* Templates */}
-      {templates.length > 0 && (
-        <div className="pt-2 border-t border-white/5 mt-3">
-          <p className="text-[10px] text-muted-foreground/40 mb-2">Agent Templates</p>
-          {templates.map((t: any, i: number) => (
-            <div key={t.name} className="flex items-center gap-2 py-1.5">
-              <span className="text-primary text-xs">🤖</span>
-              <div className="flex-1">
-                <span className="text-xs text-foreground">{t.name}</span>
-                <p className="text-[9px] text-muted-foreground truncate">{t.instructions?.slice(0, 60)}</p>
-              </div>
-              {installedNames.has(t.name) ? (
-                <span className="text-[10px] text-emerald-400">Installed</span>
-              ) : (
-                <button onClick={async () => {
-                  await api.installAgentTemplate(i);
-                  setAgents(await api.getCustomAgents());
-                  toast.success(`${t.name} installed`);
-                }} className="px-2 py-0.5 rounded bg-primary/10 text-primary text-[10px]">Install</button>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
 
 export default function Settings() {
   const [activeSection, setActiveSection] = useState("profile");
@@ -613,30 +362,9 @@ export default function Settings() {
             )}
 
             {/* Privacy */}
-            {/* Automations: Crons + Skills + Telegram + Activity */}
+            {/* Automations: Telegram + Activity */}
             {activeSection === "automations" && (
               <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-6">
-
-                {/* Custom Crons */}
-                <div className="glass rounded-xl p-6">
-                  <h2 className="text-lg font-semibold mb-2">Automations</h2>
-                  <p className="text-xs text-muted-foreground mb-4">Scheduled tasks that run automatically.</p>
-                  <AutomationsList />
-                </div>
-
-                {/* Custom Agents */}
-                <div className="glass rounded-xl p-6">
-                  <h2 className="text-lg font-semibold mb-2">Custom Agents</h2>
-                  <p className="text-xs text-muted-foreground mb-4">Create specialized AI agents with custom instructions. Each agent is a persona overlay on the Decision Agent.</p>
-                  <CustomAgentsList />
-                </div>
-
-                {/* Skill Templates */}
-                <div className="glass rounded-xl p-6">
-                  <h2 className="text-lg font-semibold mb-2">Skill Templates</h2>
-                  <p className="text-xs text-muted-foreground mb-4">Pre-built skills you can install with one click.</p>
-                  <SkillTemplates />
-                </div>
 
                 {/* Telegram */}
                 <div className="glass rounded-xl p-6">

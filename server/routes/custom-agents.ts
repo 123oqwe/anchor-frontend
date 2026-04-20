@@ -147,4 +147,47 @@ router.post("/custom/:id/feedback", (req, res) => {
   res.json({ ok: true });
 });
 
+// Natural language agent creation — user describes what they need, system generates agent config
+router.post("/custom/from-description", async (req, res) => {
+  const { description } = req.body;
+  if (!description) return res.status(400).json({ error: "description required" });
+
+  try {
+    const result = await text({
+      task: "twin_edit_learning",
+      system: `You create AI agent configurations from natural language descriptions.
+Given what the user wants, generate a complete agent config.
+
+Respond ONLY with JSON:
+{
+  "name": "Short agent name (2-3 words)",
+  "instructions": "Detailed system prompt for this agent (2-3 sentences)",
+  "tools": ["relevant_tools"],
+  "suggested_schedule": null | { "pattern": "cron pattern", "description": "human readable" }
+}
+
+Available tools: web_search, read_url, send_email, create_calendar_event, create_reminder, run_code, write_task, update_graph_node
+If the user mentions a recurring schedule (weekly, daily, etc), suggest a cron schedule.`,
+      messages: [{ role: "user", content: description }],
+      maxTokens: 300,
+    });
+
+    const stripped = result.replace(/```json\s*/g, "").replace(/```/g, "");
+    const parsed = JSON.parse(stripped.match(/\{[\s\S]*\}/)?.[0] ?? "{}");
+
+    if (!parsed.name || !parsed.instructions) {
+      return res.status(400).json({ error: "Could not parse agent config" });
+    }
+
+    res.json({
+      name: parsed.name,
+      instructions: parsed.instructions,
+      tools: parsed.tools ?? [],
+      suggestedSchedule: parsed.suggested_schedule ?? null,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 export default router;
