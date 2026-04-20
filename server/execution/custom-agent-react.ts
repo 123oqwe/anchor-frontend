@@ -17,6 +17,7 @@ import { routeTask } from "../infra/compute/router.js";
 import { getApiKey } from "../infra/compute/keys.js";
 import { logCall } from "../infra/compute/telemetry.js";
 import { getToolsForLLM, executeTool, type ExecutionContext } from "./registry.js";
+import { renderSkillsForPrompt } from "./skill-extractor.js";
 
 export interface CustomAgentToolCall {
   name: string;
@@ -117,10 +118,11 @@ export async function runCustomAgentReAct(opts: {
 
   // PTC guidance: when execute_code is available, coach the LLM to prefer one
   // multi-step code block over many small tool calls (Hermes pattern — saves
-  // 4-5x tokens on multi-step tasks).
+  // 4-5x tokens on multi-step tasks). Also inject this agent's crystallized
+  // skills (P3 — patterns that succeeded 3+ times get promoted into the prompt).
   const hasExecuteCode = opts.allowedTools.includes("execute_code");
   const systemWithPtc = hasExecuteCode
-    ? opts.systemPrompt + PTC_GUIDANCE
+    ? opts.systemPrompt + PTC_GUIDANCE + renderSkillsForPrompt(opts.agentId)
     : opts.systemPrompt;
 
   const telemetryName = `Custom: ${opts.agentName}`;

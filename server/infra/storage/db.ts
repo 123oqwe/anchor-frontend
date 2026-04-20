@@ -599,6 +599,37 @@ try { db.exec("ALTER TABLE user_agents ADD COLUMN allowed_dirs TEXT NOT NULL DEF
 try { db.exec("ALTER TABLE user_agents ADD COLUMN network_policy TEXT NOT NULL DEFAULT 'bridge-only'"); } catch {}
 try { db.exec("ALTER TABLE user_agents ADD COLUMN execution_backend TEXT NOT NULL DEFAULT 'local'"); } catch {}
 
+// P3 Skill auto-extraction: record each execute_code success + crystallize repeats
+try { db.exec(`
+  CREATE TABLE IF NOT EXISTS agent_skill_candidates (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    signature TEXT NOT NULL,
+    code TEXT NOT NULL,
+    lang TEXT NOT NULL,
+    run_id TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )
+`); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_skill_cand_sig ON agent_skill_candidates(agent_id, signature)"); } catch {}
+
+try { db.exec(`
+  CREATE TABLE IF NOT EXISTS agent_skills (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL,
+    signature TEXT NOT NULL,
+    template TEXT NOT NULL,
+    lang TEXT NOT NULL,
+    success_count INTEGER NOT NULL DEFAULT 1,
+    last_used_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(agent_id, signature)
+  )
+`); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_agent_skills_agent ON agent_skills(agent_id)"); } catch {}
+
 seedIfEmpty();
 
 /** Shared agent execution logger — replaces duplicate log() in 19 files. */

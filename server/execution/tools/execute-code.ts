@@ -23,6 +23,7 @@ import { registerTool, type ToolResult } from "../registry.js";
 import { ensureWorkspace } from "../workspace.js";
 import { mintToken } from "../agent-tokens.js";
 import { localAgentRegistry } from "../local-impl.js";
+import { recordSuccessfulRun } from "../skill-extractor.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -142,6 +143,15 @@ export function registerExecuteCodeTool(): void {
             return;
           }
           if (code === 0) {
+            // Fire-and-forget skill extraction: record this successful pattern.
+            // Threshold 3 same-signature runs → crystallize as reusable skill.
+            recordSuccessfulRun({
+              agentId: agent.id,
+              agentName: agent.name,
+              lang: input.lang,
+              code: input.code,
+              runId: ctx?.runId ?? "",
+            }).catch(() => {});
             resolve({
               success: true,
               output: tail || "(no output)",
