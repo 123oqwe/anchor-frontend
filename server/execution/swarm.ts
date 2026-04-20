@@ -114,7 +114,7 @@ function suggestTool(content: string): string {
   if ((lower.includes("email") || lower.includes("send")) && (lower.includes("@") || lower.includes("to "))) return "send_email";
   if (lower.includes("http://") || lower.includes("https://") || lower.includes("check website") || lower.includes("fetch url")) return "read_url";
   if (lower.includes("calendar") || lower.includes("schedule") || lower.includes("meeting")) return "create_calendar_event";
-  if (lower.includes("```") || lower.includes("function(") || lower.includes("const ") || lower.includes("let ")) return "run_code";
+  if (lower.includes("```") || lower.includes("function(") || lower.includes("const ") || lower.includes("let ")) return "execute_code";
   if (lower.includes("update") && (lower.includes("status") || lower.includes("graph") || lower.includes("node"))) return "update_graph_node";
   return "write_task"; // default: create a task for it
 }

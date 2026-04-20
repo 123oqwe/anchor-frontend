@@ -593,6 +593,12 @@ try { db.exec("ALTER TABLE llm_calls ADD COLUMN agent_name TEXT"); } catch {}
 try { db.exec("CREATE INDEX IF NOT EXISTS idx_exec_run ON agent_executions(run_id)"); } catch {}
 try { db.exec("CREATE INDEX IF NOT EXISTS idx_llm_run ON llm_calls(run_id)"); } catch {}
 
+// L5 Execution rebuild: per-agent scoping for code execution + bridge access
+try { db.exec("ALTER TABLE user_agents ADD COLUMN allowed_bridges TEXT NOT NULL DEFAULT '[\"*\"]'"); } catch {}
+try { db.exec("ALTER TABLE user_agents ADD COLUMN allowed_dirs TEXT NOT NULL DEFAULT '[]'"); } catch {}
+try { db.exec("ALTER TABLE user_agents ADD COLUMN network_policy TEXT NOT NULL DEFAULT 'bridge-only'"); } catch {}
+try { db.exec("ALTER TABLE user_agents ADD COLUMN execution_backend TEXT NOT NULL DEFAULT 'local'"); } catch {}
+
 seedIfEmpty();
 
 /** Shared agent execution logger — replaces duplicate log() in 19 files. */

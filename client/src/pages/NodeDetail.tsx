@@ -359,7 +359,7 @@ export default function NodeDetail() {
                 { name: "Set Reminder", tool: "create_reminder", icon: "🔔", desc: "via Reminders" },
                 { name: "Web Search", tool: "web_search", icon: "🔍", desc: "DuckDuckGo" },
                 { name: "Open URL", tool: "open_url", icon: "🌐", desc: "default browser" },
-                { name: "Run Code", tool: "run_code", icon: "💻", desc: "sandboxed JS" },
+                { name: "Run Code", tool: "execute_code", icon: "💻", desc: "Python / Node / bash" },
               ].map(t => (
                 <button key={t.tool} onClick={() => { setToolModal({ name: t.name, tool: t.tool, icon: t.icon }); setToolInput(""); }}
                   disabled={executing}

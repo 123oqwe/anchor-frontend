@@ -40,10 +40,10 @@ function triggerConfigPlaceholder(type: string): string {
 
 const AVAILABLE_TOOLS = [
   "web_search", "read_url", "send_email", "create_calendar_event", "create_reminder",
-  "open_url", "run_code", "write_task", "update_graph_node",
+  "open_url", "execute_code", "write_task", "update_graph_node",
   "read_file", "diff_file", "search_codebase", "git_status", "git_diff", "git_log",
   "run_safe_shell", "run_tests", "read_logs",
-  "agent_state_get", "agent_state_set", "call_agent",
+  "agent_state_get", "agent_state_set", "delegate",
 ];
 
 const fade = { initial: { opacity: 0, y: 12 }, animate: { opacity: 1, y: 0 } };

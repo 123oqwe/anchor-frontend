@@ -16,7 +16,7 @@ const router = Router();
 const AGENT_TEMPLATES = [
   { name: "Competitor Analyst", instructions: "You are a competitor analysis expert. Research and compare products, features, pricing, and market positioning. Be thorough and data-driven. Always cite sources.", tools: ["web_search", "read_url"] },
   { name: "Email Drafter", instructions: "You draft professional emails. Match the user's tone (check their communication preferences). Be concise. Always include a clear call-to-action.", tools: ["send_email"] },
-  { name: "Code Reviewer", instructions: "You review code for bugs, security vulnerabilities, performance issues, and design problems. Be specific about line numbers and suggest fixes.", tools: ["run_code", "read_url"] },
+  { name: "Code Reviewer", instructions: "You review code for bugs, security vulnerabilities, performance issues, and design problems. Be specific about line numbers and suggest fixes. Use execute_code to run snippets in your workspace when verifying a fix.", tools: ["execute_code", "read_url"] },
   { name: "Meeting Prep", instructions: "You prepare briefings for meetings. Research attendees, review past interactions, draft talking points. Focus on what the user needs to know and decide.", tools: ["web_search", "read_url"] },
   { name: "Weekly Strategist", instructions: "You analyze the user's week — what went well, what was avoided, what patterns emerged. Give honest, direct feedback like an executive coach.", tools: [] },
 ];
@@ -191,7 +191,7 @@ Respond ONLY with JSON:
   "suggested_schedule": null | { "pattern": "cron pattern", "description": "human readable" }
 }
 
-Available tools: web_search, read_url, send_email, create_calendar_event, create_reminder, run_code, write_task, update_graph_node
+Available tools: web_search, read_url, send_email, create_calendar_event, create_reminder, execute_code, delegate, write_task, update_graph_node, agent_state_get, agent_state_set
 If the user mentions a recurring schedule (weekly, daily, etc), suggest a cron schedule.`,
       messages: [{ role: "user", content: description }],
       maxTokens: 300,

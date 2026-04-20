@@ -1,16 +1,16 @@
 /**
  * L5 Execution — Built-in tools.
  *
- * 10 tools. Zero stubs. All functional.
+ * Architecture: Custom Agent ReAct loop picks a tool → tools run on the
+ * user's actual Mac (real Bridge, real subprocess, real files) → result
+ * streams back through the loop.
  *
- * Architecture: user says what they want in the web UI →
- * Execution Agent picks tools → tools run shell commands in background →
- * user sees "✓ Done" in the browser. User never touches Terminal.
- *
- * Layer 0 (Shell):  send_email, create_calendar, create_reminder, open_url → via AppleScript/shell
- * Layer DB:         write_task, update_graph_node, record_outcome → direct SQLite
- * Layer Code:       run_code → sandboxed JS
- * Layer Network:    web_search, read_url → fetch/curl
+ * Layer Shell:    send_email, create_calendar, create_reminder, open_url → Bridge
+ * Layer DB:       write_task, update_graph_node, record_outcome → SQLite
+ * Layer Code:     execute_code → real Python/Node/bash subprocess (tools/execute-code.ts)
+ * Layer Network:  web_search, read_url → fetch
+ * Layer Agent:    delegate → spawn subagent with fresh context (tools/delegate.ts)
+ * Layer KV:       agent_state_get, agent_state_set → per-agent persistent KV
  *
  * All tools go through L6 Permission Gate via registry.ts executeTool().
  */
@@ -20,6 +20,8 @@ import { db, DEFAULT_USER_ID, logExecution } from "../infra/storage/db.js";
 import { bus } from "../orchestration/bus.js";
 import { nanoid } from "nanoid";
 import { writeMemory } from "../memory/retrieval.js";
+import { registerExecuteCodeTool } from "./tools/execute-code.js";
+import { registerDelegateTool } from "./tools/delegate.js";
 
 /** Run AppleScript safely. Returns output string or null on failure. */
 function runAppleScript(script: string): string | null {
@@ -307,38 +309,8 @@ end tell`;
     },
   });
 
-  // ═══ Code Tool ════════════════════════════════════════════════════════
-
-  registerTool({
-    name: "run_code",
-    description: "Execute a JavaScript expression. Must RETURN a value. Example: '15000 * 6'",
-    handler: "code",
-    actionClass: "write_memory",
-    inputSchema: {
-      type: "object",
-      properties: {
-        code: { type: "string", description: "JavaScript code to execute" },
-      },
-      required: ["code"],
-    },
-    execute: async (input): Promise<ToolResult> => {
-      try {
-        let code = (input.code ?? "").trim();
-        const forbidden = ["require", "import", "process", "fs", "child_process", "exec", "spawn"];
-        for (const f of forbidden) {
-          if (code.includes(f)) return { success: false, output: `Forbidden: "${f}" not allowed`, error: "SANDBOX_VIOLATION" };
-        }
-        code = code.replace(/^console\.log\((.+)\);?$/, "$1").replace(/^return\s+/, "");
-        const isMulti = code.includes("const ") || code.includes("let ") || code.includes(";");
-        const wrapped = isMulti ? `"use strict"; ${code}` : `"use strict"; return (${code})`;
-        const result = new Function(wrapped)();
-        const output = result === undefined ? "(no return value)" : typeof result === "object" ? JSON.stringify(result, null, 2) : String(result);
-        return { success: true, output: output.slice(0, 2000), data: { result } };
-      } catch (err: any) {
-        return { success: false, output: `Code error: ${err.message}`, error: err.message };
-      }
-    },
-  });
+  // ═══ Code Tool — real subprocess via execute_code (see tools/execute-code.ts) ═══
+  // (registered below via registerExecuteCodeTool)
 
   // ═══ Agent State KV (OPT-5) ═══════════════════════════════════════════
 
@@ -389,50 +361,12 @@ end tell`;
     },
   });
 
-  // ═══ Agent Composition (OPT-3) ═════════════════════════════════════════
+  // ═══ Agent Composition — delegate (Claude Code-style subagent) ═════════
+  // (registered below via registerDelegateTool — replaces old call_agent)
 
-  registerTool({
-    name: "call_agent",
-    description: "Invoke another custom agent by name and get its response. Use for composing agents: Agent A can call Agent B.",
-    handler: "internal",
-    actionClass: "delegate_agent",
-    inputSchema: {
-      type: "object",
-      properties: {
-        agent_name: { type: "string", description: "Name of the custom agent to call" },
-        input: { type: "string", description: "Input message to send to that agent" },
-      },
-      required: ["agent_name", "input"],
-    },
-    execute: async (input, ctx): Promise<ToolResult> => {
-      // Recursion guard via ExecutionContext.stepIndex chain (simple: cap depth 3)
-      const prevCallAgent = (ctx?.previousResults ?? []).filter(r => r.toolName === "call_agent").length;
-      if (prevCallAgent >= 2) {
-        return { success: false, output: "Max agent call depth (3) exceeded", error: "MAX_DEPTH" };
-      }
+  // Register tools from dedicated files (real subprocess execute_code, subagent delegate)
+  registerExecuteCodeTool();
+  registerDelegateTool();
 
-      const agent = db.prepare("SELECT * FROM user_agents WHERE user_id=? AND name=?")
-        .get(DEFAULT_USER_ID, input.agent_name) as any;
-      if (!agent) return { success: false, output: `Agent not found: ${input.agent_name}`, error: "NOT_FOUND" };
-
-      try {
-        const { text: llmText } = await import("../infra/compute/index.js");
-        const { serializeForPrompt } = await import("../graph/reader.js");
-        const systemPrompt = `${agent.instructions}\n\nUser's Human Graph context:\n${serializeForPrompt()}`;
-        const result = await llmText({
-          task: "decision",
-          system: systemPrompt,
-          messages: [{ role: "user", content: input.input }],
-          maxTokens: 1000,
-          runId: ctx?.runId,
-          agentName: `Called: ${agent.name}`,
-        });
-        return { success: true, output: result, data: { agent_name: agent.name } };
-      } catch (err: any) {
-        return { success: false, output: `Agent call failed: ${err.message}`, error: err.message };
-      }
-    },
-  });
-
-  console.log(`[Execution] 13 tools registered (3 DB + 4 shell + 2 network + 1 code + 2 agent_state + 1 call_agent)`);
+  console.log(`[Execution] 13 tools registered (3 DB + 4 shell + 2 network + 1 execute_code + 2 agent_state + 1 delegate)`);
 }
