@@ -54,6 +54,7 @@ export default function Dashboard() {
   const [twinModel, setTwinModel] = useState<any>(null);
   const [evolution, setEvolution] = useState<any[]>([]);
   const [recommendations, setRecommendations] = useState<any[]>([]);
+  const [diagnostic, setDiagnostic] = useState<any>(null);
   const { fetchGraph, fetchDecision, fetchDigest } = useAnchorStore();
 
   useEffect(() => {
@@ -67,7 +68,8 @@ export default function Dashboard() {
       api.getTwinModel().catch(() => null),
       api.getEvolutionState().catch(() => []),
       api.getRecommendations().catch(() => []),
-    ]).then(([dec, st, port, graph, dig, decay, twin, evo, recs]) => {
+      api.getDiagnosticReport().catch(() => null),
+    ]).then(([dec, st, port, graph, dig, decay, twin, evo, recs, diag]) => {
       setDecision(dec);
       setState(st);
       setPortrait(port);
@@ -79,6 +81,7 @@ export default function Dashboard() {
       setTwinModel(twin);
       setEvolution(evo ?? []);
       setRecommendations(recs ?? []);
+      setDiagnostic(diag);
     }).finally(() => setLoading(false));
   }, []);
 
@@ -177,6 +180,36 @@ export default function Dashboard() {
                     </div>
                   ))}
                 </div>
+              )}
+            </div>
+          </motion.div>
+        )}
+
+        {/* ── System Diagnostic ──────────────────────────────── */}
+        {diagnostic?.data && (
+          <motion.div {...fade} transition={{ delay: 0.10, duration: 0.5 }} className="mt-8 mb-2">
+            <h2 className="text-xs font-medium text-muted-foreground/60 tracking-widest uppercase mb-3">System Diagnostic</h2>
+            <div className="glass rounded-xl p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <span className={`w-2 h-2 rounded-full ${diagnostic.data.alerts?.filter((a: any) => a.severity === "critical").length > 0 ? "bg-red-400" : "bg-emerald-400"}`} />
+                <span className="text-sm font-medium text-foreground">Phase {diagnostic.data.phase}</span>
+                <span className="text-[10px] text-muted-foreground ml-auto">{diagnostic.data.phaseReason?.slice(0, 50)}</span>
+              </div>
+              {diagnostic.data.alerts?.filter((a: any) => a.severity !== "info").slice(0, 3).map((a: any, i: number) => (
+                <div key={i} className="flex items-center gap-2 text-xs mt-1">
+                  <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${a.severity === "critical" ? "bg-red-400" : "bg-amber-400"}`} />
+                  <span className={a.severity === "critical" ? "text-red-400/80" : "text-amber-400/80"}>{a.message}</span>
+                </div>
+              ))}
+              {diagnostic.data.fixesApplied?.length > 0 && (
+                <div className="mt-2 pt-2 border-t border-white/5">
+                  {diagnostic.data.fixesApplied.map((f: string, i: number) => (
+                    <div key={i} className="text-[10px] text-emerald-400/60 mt-0.5">Auto-fix: {f}</div>
+                  ))}
+                </div>
+              )}
+              {(!diagnostic.data.alerts || diagnostic.data.alerts.filter((a: any) => a.severity !== "info").length === 0) && (
+                <p className="text-xs text-emerald-400/60 mt-1">All systems healthy</p>
               )}
             </div>
           </motion.div>

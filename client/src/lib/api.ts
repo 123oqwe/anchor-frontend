@@ -143,6 +143,8 @@ export const api = {
   getPerformance: (days = 7) => req<any[]>("GET", `/api/admin/performance?days=${days}`),
   getCalls: (limit = 100) => req<any[]>("GET", `/api/admin/calls?limit=${limit}`),
   getCallDetail: (id: string) => req<any>("GET", `/api/admin/calls/${id}`),
+  getDiagnosticReport: () => req<any>("GET", "/api/admin/diagnostic"),
+  runDiagnostic: () => req<any>("POST", "/api/admin/diagnostic/run"),
   getSystemHealth: () => req<any>("GET", "/api/admin/health"),
   getOverrides: () => req<Record<string, string>>("GET", "/api/admin/overrides"),
   setOverride: (task: string, modelId: string) => req("PUT", `/api/admin/overrides/${task}`, { modelId }),

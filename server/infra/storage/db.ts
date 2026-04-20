@@ -420,6 +420,25 @@ db.exec(`
     revoked_at TEXT,
     version TEXT NOT NULL DEFAULT '1.0'
   );
+
+  -- System config (adjustable thresholds for Diagnostic Agent)
+  CREATE TABLE IF NOT EXISTS system_config (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'default',
+    expires_at TEXT,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  -- Diagnostic reports (weekly snapshots for trend analysis)
+  CREATE TABLE IF NOT EXISTS diagnostic_reports (
+    id TEXT PRIMARY KEY,
+    phase INTEGER NOT NULL DEFAULT 1,
+    data_json TEXT NOT NULL,
+    alerts_json TEXT NOT NULL DEFAULT '[]',
+    fixes_applied_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
 `);
 
 // ─── Default user seed ────────────────────────────────────────────────────────

@@ -18,6 +18,7 @@ import { db, DEFAULT_USER_ID } from "../infra/storage/db.js";
 import { nanoid } from "nanoid";
 import { text } from "../infra/compute/index.js";
 import type { DecisionResult } from "./decision.js";
+import { getConfig } from "./diagnostic.js";
 
 export interface SkillMatch {
   skillId: string;
@@ -57,8 +58,9 @@ export function detectSkillMatch(
     const matchCount = keywords.filter((kw: string) => msgLower.includes(kw)).length;
     const matchRatio = matchCount / keywords.length;
 
-    // Require at least 60% keyword match
-    if (matchRatio < 0.6) continue;
+    // Require at least threshold keyword match
+    const matchThreshold = parseFloat(getConfig("skill_match_threshold", "0.6"));
+    if (matchRatio < matchThreshold) continue;
 
     // Check context conditions
     let contextConditions: Record<string, any> = {};
@@ -204,7 +206,8 @@ export async function tryCrystallizeSkill(
     "SELECT content FROM messages WHERE user_id=? AND role='draft' AND draft_status='pending' AND created_at >= datetime('now', '-14 days') ORDER BY created_at DESC LIMIT 15"
   ).all(DEFAULT_USER_ID) as any[];
 
-  if (recentPlans.length < 3) return null;
+  const minPlans = parseInt(getConfig("skill_crystallize_min", "3"));
+  if (recentPlans.length < minPlans) return null;
 
   // Extract step patterns from recent plans
   const planSteps: string[][] = [];

@@ -21,6 +21,7 @@
 import { db, DEFAULT_USER_ID, logExecution } from "../infra/storage/db.js";
 import { nanoid } from "nanoid";
 import { text } from "../infra/compute/index.js";
+import { getConfig } from "./diagnostic.js";
 
 // ── Dimension read/write ───────────────────────────────────────────────────
 
@@ -301,7 +302,8 @@ export async function runPersonalEvolution(): Promise<{
   const signals = capture();
   const signalCount = signals.satisfactionSignals.length + signals.twinInsights.length;
 
-  if (signalCount < 2) {
+  const minSignals = parseInt(getConfig("evolution_min_signals", "2"));
+  if (signalCount < minSignals) {
     console.log("[Evolution] Not enough signals to evolve. Skipping.");
     return { signalsProcessed: 0, dimensionsUpdated: [] };
   }

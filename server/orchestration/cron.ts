@@ -15,6 +15,7 @@ import { captureActiveWindow, updateGraphFromActivity, cleanupOldCaptures } from
 import { runPersonalEvolution } from "../cognition/evolution.js";
 import { analyzeExecutionTraces } from "../cognition/gepa.js";
 import { runSystemEvolution } from "./system-evolution.js";
+import { runDiagnostic } from "../cognition/diagnostic.js";
 
 // ── Every day 08:00 — Morning Digest ────────────────────────────────────────
 schedule("0 8 * * *", async () => {
@@ -245,8 +246,30 @@ schedule("0 6 * * 0", async () => {
   }
 });
 
+// ── Every Sunday 07:00 — Self-Diagnostic Agent ────────────────────────────
+schedule("0 7 * * 0", () => {
+  // Skip if user inactive > 7 days
+  const lastMsg = db.prepare("SELECT MAX(created_at) as last FROM messages WHERE user_id=? AND role='user'").get(DEFAULT_USER_ID) as any;
+  const inactiveDays = lastMsg?.last ? (Date.now() - new Date(lastMsg.last).getTime()) / 86400000 : 999;
+  if (inactiveDays > 7) {
+    console.log("[Cron] Diagnostic skipped — user inactive for " + Math.round(inactiveDays) + " days");
+    return;
+  }
+
+  console.log("[Cron] Self-Diagnostic starting...");
+  try {
+    const report = runDiagnostic();
+    const criticals = report.alerts.filter(a => a.severity === "critical").length;
+    const warnings = report.alerts.filter(a => a.severity === "warning").length;
+    logExecution("Diagnostic Agent", `Phase ${report.phase}: ${criticals}C ${warnings}W ${report.fixesApplied.length} fixes`);
+  } catch (err: any) {
+    console.error("[Cron] Diagnostic failed:", err.message);
+    logExecution("Diagnostic Agent", "Diagnostic failed", "failed");
+  }
+});
+
 export function startCronJobs() {
   // Start first capture immediately
   try { captureActiveWindow(); } catch (err) { console.error("[Cron] Initial capture failed:", err); }
-  console.log("⏰ Cron: Activity(5min) | Digest(8am) | Decay(6h) | Twin(Mon 9am) | Tasks(10pm) | Dream(3am) | Evolution(4am) | GEPA(Sun 5am) | SysEvo(Sun 6am) | Proactive(12h) | GraphUpdate(6h)");
+  console.log("⏰ Cron: Activity(5min) | Digest(8am) | Decay(6h) | Twin(Mon 9am) | Tasks(10pm) | Dream(3am) | Evolution(4am) | GEPA(Sun 5am) | SysEvo(Sun 6am) | Diagnostic(Sun 7am) | Proactive(12h) | GraphUpdate(6h)");
 }

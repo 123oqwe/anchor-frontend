@@ -259,4 +259,26 @@ router.get("/health", (_req, res) => {
   }
 });
 
+router.get("/diagnostic", (_req, res) => {
+  const latest = db.prepare("SELECT * FROM diagnostic_reports ORDER BY created_at DESC LIMIT 1").get() as any;
+  if (!latest) return res.json(null);
+  res.json({
+    ...latest,
+    data: JSON.parse(latest.data_json),
+    alerts: JSON.parse(latest.alerts_json),
+    fixesApplied: JSON.parse(latest.fixes_applied_json),
+  });
+});
+
+// Manual trigger
+router.post("/diagnostic/run", (_req, res) => {
+  try {
+    const { runDiagnostic } = require("../cognition/diagnostic.js");
+    const report = runDiagnostic();
+    res.json(report);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 export default router;
