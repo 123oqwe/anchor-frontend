@@ -29,7 +29,9 @@ export type ActionClass =
   | "admin_config"       // System configuration
   | "delete_data"        // Deleting user data
   | "browser_action"     // Browser automation
-  | "code_execution";    // Running code in sandbox
+  | "code_execution"     // Running code in sandbox
+  | "execute_command"    // OPT-1: shell/git/file writes (high risk)
+  | "delegate_agent";    // OPT-1: delegating to another agent (MCP call)
 
 export type RiskTier = "low" | "medium" | "high" | "critical";
 
@@ -55,6 +57,8 @@ export const DEFAULT_POLICY: Record<ActionClass, ActionPolicy> = {
   delete_data:     { actionClass: "delete_data",     defaultLevel: "L1_draft",          requiresAudit: true,  riskTier: "critical",  maxPerHour: 5,   cronAllowed: false },
   browser_action:  { actionClass: "browser_action",  defaultLevel: "L2_confirm_execute",requiresAudit: true,  riskTier: "high",     maxPerHour: 30,  cronAllowed: false },
   code_execution:  { actionClass: "code_execution",  defaultLevel: "L2_confirm_execute",requiresAudit: true,  riskTier: "medium",   maxPerHour: 20,  cronAllowed: true },
+  execute_command: { actionClass: "execute_command", defaultLevel: "L2_confirm_execute",requiresAudit: true,  riskTier: "high",     maxPerHour: 30,  cronAllowed: false },
+  delegate_agent:  { actionClass: "delegate_agent",  defaultLevel: "L3_bounded_auto",   requiresAudit: true,  riskTier: "medium",   maxPerHour: 50,  cronAllowed: true },
 };
 
 // ── Output Boundary Classifications (from spec: agent-boundaries.ts) ────────
