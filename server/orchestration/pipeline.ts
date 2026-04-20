@@ -94,14 +94,30 @@ export async function runPipeline(pipelineId: string, triggerInput: string, opti
       const graphContext = serializeForPrompt();
       const systemPrompt = `${agent.instructions}\n\nUser's Human Graph context:\n${graphContext}\n\n(Running as step ${i + 1}/${steps.length} of pipeline "${pipeline.name}")`;
 
-      const output = await text({
-        task: "decision",
-        system: systemPrompt,
-        messages: [{ role: "user", content: resolvedInput }],
-        maxTokens: 1500,
-        runId,
-        agentName: `Pipeline[${pipeline.name}].${step.output_key}`,
-      });
+      const allowedTools: string[] = (() => { try { return JSON.parse(agent.tools) ?? []; } catch { return []; } })();
+
+      let output: string;
+      if (allowedTools.length > 0) {
+        const { runCustomAgentReAct } = await import("../execution/custom-agent-react.js");
+        const reactResult = await runCustomAgentReAct({
+          agentId: agent.id,
+          agentName: `Pipeline[${pipeline.name}].${step.output_key}`,
+          systemPrompt,
+          userMessage: resolvedInput,
+          allowedTools,
+          runId,
+        });
+        output = reactResult.text || "(tool-only step)";
+      } else {
+        output = await text({
+          task: "decision",
+          system: systemPrompt,
+          messages: [{ role: "user", content: resolvedInput }],
+          maxTokens: 1500,
+          runId,
+          agentName: `Pipeline[${pipeline.name}].${step.output_key}`,
+        });
+      }
 
       const stepLatency = Date.now() - stepStart;
       // Query last llm_call for cost

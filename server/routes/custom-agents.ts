@@ -78,6 +78,7 @@ router.post("/custom/:id/run", async (req, res) => {
   if (!message) return res.status(400).json({ error: "message required" });
 
   const runId = nanoid();  // OPT-4: trace correlation
+  const allowedTools: string[] = (() => { try { return JSON.parse(agent.tools) ?? []; } catch { return []; } })();
 
   try {
     const graphContext = serializeForPrompt();
@@ -93,14 +94,33 @@ router.post("/custom/:id/run", async (req, res) => {
 
     const systemPrompt = `${agent.instructions}\n\nUser's Human Graph context:\n${graphContext}${prevContext}`;
 
-    const result = await text({
-      task: "decision",
-      system: systemPrompt,
-      messages: [{ role: "user", content: message }],
-      maxTokens: 2000,
-      runId,
-      agentName: `Custom: ${agent.name}`,
-    });
+    // Branch: if agent has tools configured, route through ReAct loop so it can
+    // actually call them. Otherwise, use plain text() for lower latency/cost.
+    let result: string;
+    let toolCalls: { name: string; input: any; output: string; success: boolean; latencyMs: number }[] = [];
+
+    if (allowedTools.length > 0) {
+      const { runCustomAgentReAct } = await import("../execution/custom-agent-react.js");
+      const reactResult = await runCustomAgentReAct({
+        agentId: agent.id,
+        agentName: agent.name,
+        systemPrompt,
+        userMessage: message,
+        allowedTools,
+        runId,
+      });
+      result = reactResult.text || "(agent completed tool calls but produced no text output)";
+      toolCalls = reactResult.toolCalls;
+    } else {
+      result = await text({
+        task: "decision",
+        system: systemPrompt,
+        messages: [{ role: "user", content: message }],
+        maxTokens: 2000,
+        runId,
+        agentName: `Custom: ${agent.name}`,
+      });
+    }
 
     // Log execution with run_id for trace
     db.prepare("INSERT INTO agent_executions (id, user_id, agent, action, status, run_id) VALUES (?,?,?,?,?,?)")
@@ -119,7 +139,7 @@ router.post("/custom/:id/run", async (req, res) => {
     // Extract insights into graph (non-blocking, fires async internally)
     extractFromMessage(result);
 
-    res.json({ id: runId, content: result, agentName: agent.name });
+    res.json({ id: runId, content: result, agentName: agent.name, toolCalls });
   } catch (err: any) {
     db.prepare("INSERT INTO agent_executions (id, user_id, agent, action, status, run_id) VALUES (?,?,?,?,?,?)")
       .run(nanoid(), DEFAULT_USER_ID, `Custom: ${agent.name}`, message.slice(0, 100), "failed", runId);

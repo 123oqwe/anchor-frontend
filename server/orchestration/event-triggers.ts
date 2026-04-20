@@ -76,14 +76,30 @@ async function runAgentFromEvent(agent: any, eventPayload: any): Promise<void> {
     const graphContext = serializeForPrompt();
     const systemPrompt = `${agent.instructions}\n\nUser's Human Graph context:\n${graphContext}\n\n(Triggered by ${agent.trigger_type} event)`;
 
-    const result = await text({
-      task: "decision",
-      system: systemPrompt,
-      messages: [{ role: "user", content: message }],
-      maxTokens: 1500,
-      runId,
-      agentName: `Triggered: ${agent.name}`,
-    });
+    const allowedTools: string[] = (() => { try { return JSON.parse(agent.tools) ?? []; } catch { return []; } })();
+
+    let result: string;
+    if (allowedTools.length > 0) {
+      const { runCustomAgentReAct } = await import("../execution/custom-agent-react.js");
+      const reactResult = await runCustomAgentReAct({
+        agentId: agent.id,
+        agentName: agent.name,
+        systemPrompt,
+        userMessage: message,
+        allowedTools,
+        runId,
+      });
+      result = reactResult.text || "(agent completed tool calls)";
+    } else {
+      result = await text({
+        task: "decision",
+        system: systemPrompt,
+        messages: [{ role: "user", content: message }],
+        maxTokens: 1500,
+        runId,
+        agentName: `Triggered: ${agent.name}`,
+      });
+    }
 
     db.prepare("INSERT INTO agent_executions (id, user_id, agent, action, status, run_id) VALUES (?,?,?,?,?,?)")
       .run(nanoid(), DEFAULT_USER_ID, `Triggered: ${agent.name}`, JSON.stringify(eventPayload).slice(0, 100), "success", runId);
