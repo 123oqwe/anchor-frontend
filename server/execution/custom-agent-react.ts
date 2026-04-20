@@ -130,6 +130,8 @@ export async function runCustomAgentReAct(opts: {
   const messages: Anthropic.Messages.MessageParam[] = [{ role: "user", content: opts.userMessage }];
   let finalText = "";
   let turn = 0;
+  let consecutiveFailures = 0;   // P5 self-eval — track error streak
+  let rethinkInjected = false;   // only nudge once per run
 
   for (; turn < MAX_TURNS; turn++) {
     const llmStart = Date.now();
@@ -186,6 +188,8 @@ export async function runCustomAgentReAct(opts: {
     if (toolUses.length === 0) break;
 
     const toolResults: Anthropic.Messages.ToolResultBlockParam[] = [];
+    let turnHadFailure = false;
+    let turnHadSuccess = false;
     for (const tu of toolUses) {
       const context: ExecutionContext = {
         previousResults: toolCalls.map(c => ({ toolName: c.name, output: c.output })),
@@ -198,6 +202,8 @@ export async function runCustomAgentReAct(opts: {
       const toolStart = Date.now();
       const result = await executeTool(tu.name, tu.input, context, "agent_chain");
       const latency = Date.now() - toolStart;
+
+      if (result.success) turnHadSuccess = true; else turnHadFailure = true;
 
       toolCalls.push({
         name: tu.name,
@@ -215,8 +221,50 @@ export async function runCustomAgentReAct(opts: {
       });
     }
 
+    // P5 self-eval: consecutive-failure detection. If this turn had at least
+    // one failure and no success, and so did the previous turn, inject a
+    // one-shot rethink nudge into the next tool_result so the LLM reconsiders
+    // its approach instead of grinding on the same failing path.
+    if (turnHadFailure && !turnHadSuccess) consecutiveFailures++;
+    else consecutiveFailures = 0;
+
+    if (consecutiveFailures >= 2 && !rethinkInjected && toolResults.length > 0) {
+      const last = toolResults[toolResults.length - 1];
+      last.content = (typeof last.content === "string" ? last.content : "") +
+        "\n\n[SYSTEM NOTE] You've had two tool failures in a row. Stop and reconsider: " +
+        "is there a different tool, input format, or approach that's more likely to work? " +
+        "If nothing will, acknowledge that and return what you know.";
+      rethinkInjected = true;
+    }
+
     messages.push({ role: "user", content: toolResults });
     if (response.stop_reason === "end_turn") break;
+  }
+
+  // P5 final synthesis: if the loop ended with tool calls but no text output
+  // (common when MAX_TURNS hit or the LLM just tool-looped), ask one last
+  // non-tool round to summarize what was accomplished. Users expect text back.
+  if (!finalText.trim() && toolCalls.length > 0) {
+    try {
+      const synth = await anthropic.messages.create({
+        model: modelId,
+        max_tokens: 400,
+        system: systemWithPtc,
+        // No tools — force text only
+        messages: [
+          ...messages,
+          { role: "user", content: "Summarize in 1-3 sentences what you did and what the result was. No tool calls." },
+        ],
+      });
+      const synthText = (synth.content as any[])
+        .filter((b) => b.type === "text")
+        .map((b: any) => b.text)
+        .join("\n")
+        .trim();
+      if (synthText) finalText = synthText;
+    } catch {
+      // If synthesis fails, leave finalText empty — upstream will show fallback
+    }
   }
 
   return { text: finalText, toolCalls, turns: turn + 1 };
