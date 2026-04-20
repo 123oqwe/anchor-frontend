@@ -18,6 +18,7 @@ import { initMCP } from "./infra/mcp/index.js";
 // Event bus handlers and cron jobs
 import { startEventHandlers } from "./orchestration/handlers.js";
 import { startCronJobs } from "./orchestration/cron.js";
+import { startEventTriggers, startWatchersFromAgents } from "./orchestration/event-triggers.js";
 
 // Route handlers
 import userRoutes from "./routes/user.js";
@@ -85,6 +86,8 @@ async function startServer() {
   initMCP();                // L8: MCP server
   startEventHandlers();
   startCronJobs();
+  startEventTriggers();                          // OPT-2: route events to Custom Agents
+  startWatchersFromAgents().catch(() => {});     // OPT-2: start file/idle watchers if agents need them
 
   // ── WebSocket — real-time event push to frontend ───────────────────────────
   const wss = new WebSocketServer({ server, path: "/ws" });

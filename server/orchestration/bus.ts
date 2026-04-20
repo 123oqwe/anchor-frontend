@@ -21,7 +21,15 @@ export type AnchorEvent =
   | { type: "GRAPH_UPDATED"; payload: { nodeId: string; status: string; label: string } }
   | { type: "TASK_COMPLETED"; payload: { taskId: string; title: string } }
   | { type: "NOTIFICATION"; payload: { id: string; type: string; title: string; body: string; priority: string; action?: any } }
-  | { type: "SCAN_PROGRESS"; payload: { phase: string; status: string; found: number } };
+  | { type: "SCAN_PROGRESS"; payload: { phase: string; status: string; found: number } }
+  // OPT-2: Event triggers for Custom Agents
+  | { type: "FILE_CHANGED"; payload: { path: string; event: "add" | "change" | "delete" } }
+  | { type: "GIT_COMMIT"; payload: { repo: string; sha: string; message: string } }
+  | { type: "EMAIL_RECEIVED"; payload: { from: string; subject: string; snippet: string } }
+  | { type: "CALENDAR_UPCOMING"; payload: { title: string; startsInMinutes: number } }
+  | { type: "NODE_STATUS_CHANGED"; payload: { nodeId: string; label: string; from: string; to: string } }
+  | { type: "APP_FOCUSED"; payload: { app: string; previous: string } }
+  | { type: "IDLE_DETECTED"; payload: { idleMinutes: number } };
 
 class AnchorBus extends EventEmitter {
   publish(data: AnchorEvent) {

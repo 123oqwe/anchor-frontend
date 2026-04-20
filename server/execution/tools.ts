@@ -88,6 +88,8 @@ export function registerBuiltinTools(): void {
       const oldStatus = node.status;
       db.prepare("UPDATE graph_nodes SET status=?, updated_at=datetime('now') WHERE id=?").run(input.new_status, node.id);
       bus.publish({ type: "GRAPH_UPDATED", payload: { nodeId: node.id, status: input.new_status, label: node.label } });
+      // OPT-2: emit NODE_STATUS_CHANGED for event-triggered agents
+      bus.publish({ type: "NODE_STATUS_CHANGED", payload: { nodeId: node.id, label: node.label, from: oldStatus, to: input.new_status } });
       return { success: true, output: `"${node.label}": ${oldStatus} → ${input.new_status}.`, data: { nodeId: node.id } };
     },
   });

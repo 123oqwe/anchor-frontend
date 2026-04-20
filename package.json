@@ -47,6 +47,7 @@
     "ai": "^6.0.162",
     "axios": "^1.12.0",
     "better-sqlite3": "^12.8.0",
+    "chokidar": "^5.0.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
