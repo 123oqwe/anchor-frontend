@@ -56,6 +56,7 @@ export default function Dashboard() {
   const [recommendations, setRecommendations] = useState<any[]>([]);
   const [diagnostic, setDiagnostic] = useState<any>(null);
   const [activitySummary, setActivitySummary] = useState<any>(null);
+  const [activeInsight, setActiveInsight] = useState<any>(null);
   const { fetchGraph, fetchDecision, fetchDigest } = useAnchorStore();
 
   useEffect(() => {
@@ -71,7 +72,8 @@ export default function Dashboard() {
       api.getRecommendations().catch(() => []),
       api.getDiagnosticReport().catch(() => null),
       api.getActivitySummary(24).catch(() => null),
-    ]).then(([dec, st, port, graph, dig, decay, twin, evo, recs, diag, actSum]) => {
+      api.getActiveInsight().catch(() => null),
+    ]).then(([dec, st, port, graph, dig, decay, twin, evo, recs, diag, actSum, insight]) => {
       setDecision(dec);
       setState(st);
       setPortrait(port);
@@ -85,6 +87,7 @@ export default function Dashboard() {
       setRecommendations(recs ?? []);
       setDiagnostic(diag);
       setActivitySummary(actSum);
+      setActiveInsight(insight);
     }).finally(() => setLoading(false));
   }, []);
 
@@ -151,6 +154,37 @@ export default function Dashboard() {
             </motion.button>
           )}
         </motion.div>
+
+        {/* ── OPT-7: Active Twin Insight (one-line actionable) ─── */}
+        {activeInsight && activeInsight.insight && (
+          <motion.div {...fade} transition={{ delay: 0.06, duration: 0.5 }} className="mt-6 mb-2">
+            <div className={`glass rounded-xl p-5 border-l-2 ${
+              activeInsight.severity === "critical" ? "border-red-400/60"
+              : activeInsight.severity === "warning" ? "border-amber-400/60"
+              : "border-primary/30"
+            }`}>
+              <div className="flex items-start gap-3">
+                <Brain className={`h-4 w-4 shrink-0 mt-0.5 ${
+                  activeInsight.severity === "critical" ? "text-red-400"
+                  : activeInsight.severity === "warning" ? "text-amber-400"
+                  : "text-primary"
+                }`} />
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm text-foreground font-medium leading-snug">{activeInsight.insight}</p>
+                  <p className="text-[10px] text-muted-foreground mt-1 italic">{activeInsight.reason}</p>
+                </div>
+                {activeInsight.action && (
+                  <button
+                    onClick={() => activeInsight.action.route && navigate(activeInsight.action.route)}
+                    className="text-xs text-primary hover:text-primary/80 transition-colors shrink-0 whitespace-nowrap"
+                  >
+                    {activeInsight.action.label} →
+                  </button>
+                )}
+              </div>
+            </div>
+          </motion.div>
+        )}
 
         {/* ── System Activity (what happened overnight) ─── */}
         {digest?.hasUpdates && (

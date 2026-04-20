@@ -51,6 +51,137 @@ router.get("/self-portrait", async (_req, res) => {
   }
 });
 
+// ── OPT-7: Active Twin Insight — one-line actionable daily insight ─────────
+// Pure SQL + scoring. Zero LLM calls. Picks TOP 1 from multiple signal sources.
+
+router.get("/active-insight", (_req, res) => {
+  try {
+    // Cold start guard: need at least some data
+    const firstMsg = db.prepare("SELECT MIN(created_at) as first FROM messages WHERE user_id=?").get(DEFAULT_USER_ID) as any;
+    if (!firstMsg?.first) {
+      return res.json({
+        insight: "Welcome to Anchor. Start a conversation to begin building your Twin.",
+        severity: "info",
+        reason: "No data yet",
+        source: "onboarding",
+      });
+    }
+    const daysActive = (Date.now() - new Date(firstMsg.first).getTime()) / 86400000;
+    if (daysActive < 3) {
+      return res.json({
+        insight: `Anchor is learning. ${Math.round(daysActive)} days of data so far.`,
+        severity: "info",
+        reason: "Accumulating baseline",
+        source: "onboarding",
+      });
+    }
+
+    const candidates: Array<{ insight: string; severity: string; reason: string; source: string; score: number; action?: any }> = [];
+
+    // Signal 1: Decaying relationships (immediate action)
+    const decaying = db.prepare(
+      `SELECT id, label, julianday('now') - julianday(updated_at) as days
+       FROM graph_nodes WHERE user_id=? AND type='person'
+       AND julianday('now') - julianday(updated_at) > 21
+       ORDER BY days DESC LIMIT 1`
+    ).get(DEFAULT_USER_ID) as any;
+    if (decaying) {
+      candidates.push({
+        insight: `You haven't touched "${decaying.label}" in ${Math.round(decaying.days)} days. Relationship decaying.`,
+        severity: "warning",
+        reason: "Behavioral decay detected via exponential decay model",
+        source: "relationships",
+        score: Math.min(100, Math.round(decaying.days * 2)),
+        action: { label: "Reach out", route: `/graph/${decaying.id}` },
+      });
+    }
+
+    // Signal 2: Goal vs Activity mismatch (say vs do)
+    const goals = db.prepare(
+      "SELECT label FROM graph_nodes WHERE user_id=? AND type='goal' AND status='active' LIMIT 3"
+    ).all(DEFAULT_USER_ID) as any[];
+    const recentActivity = db.prepare(
+      `SELECT app_name, COUNT(*) as cnt FROM activity_captures
+       WHERE user_id=? AND captured_at >= datetime('now', '-7 days')
+       GROUP BY app_name ORDER BY cnt DESC LIMIT 5`
+    ).all(DEFAULT_USER_ID) as any[];
+    const topApp = recentActivity[0];
+    if (goals.length > 0 && topApp) {
+      const goalKeywords = goals.map((g: any) => g.label.toLowerCase()).join(" ");
+      const appCoversGoal = goalKeywords.includes(topApp.app_name.toLowerCase()) ||
+        /Cursor|VS Code|Xcode|Figma|Linear|Notion/i.test(topApp.app_name);
+      if (!appCoversGoal && topApp.cnt > 30) {
+        const topAppHours = Math.round(topApp.cnt * 5 / 60);
+        candidates.push({
+          insight: `You spent ${topAppHours}h in ${topApp.app_name} this week. Your goals don't mention it.`,
+          severity: "warning",
+          reason: "Say-vs-do gap: activity not aligned with stated goals",
+          source: "say_vs_do",
+          score: Math.min(90, topAppHours * 2),
+        });
+      }
+    }
+
+    // Signal 3: Overdue items
+    const overdue = db.prepare(
+      "SELECT label, id FROM graph_nodes WHERE user_id=? AND status IN ('overdue','delayed') ORDER BY updated_at LIMIT 1"
+    ).get(DEFAULT_USER_ID) as any;
+    if (overdue) {
+      candidates.push({
+        insight: `"${overdue.label}" is overdue. Every day of delay compounds.`,
+        severity: "critical",
+        reason: "Node marked overdue or delayed",
+        source: "overdue",
+        score: 85,
+        action: { label: "Address now", route: `/graph/${overdue.id}` },
+      });
+    }
+
+    // Signal 4: Twin drift
+    const recentInsights = db.prepare(
+      "SELECT insight, confidence FROM twin_insights WHERE user_id=? AND created_at >= datetime('now', '-7 days') ORDER BY confidence DESC LIMIT 1"
+    ).get(DEFAULT_USER_ID) as any;
+    if (recentInsights && recentInsights.confidence > 0.75) {
+      candidates.push({
+        insight: recentInsights.insight.slice(0, 120),
+        severity: "info",
+        reason: `Twin learned this with ${Math.round(recentInsights.confidence * 100)}% confidence`,
+        source: "twin",
+        score: Math.round(recentInsights.confidence * 70),
+      });
+    }
+
+    // Signal 5: Memory capacity pressure
+    const memTotal = (db.prepare("SELECT COUNT(*) as c FROM memories WHERE user_id=?").get(DEFAULT_USER_ID) as any)?.c ?? 0;
+    if (memTotal > 170) {
+      candidates.push({
+        insight: `Memory at ${memTotal}/200. Dream Engine will prune tonight at 3am.`,
+        severity: "info",
+        reason: "Approaching capacity limit",
+        source: "memory",
+        score: 30,
+      });
+    }
+
+    // Pick top by score
+    candidates.sort((a, b) => b.score - a.score);
+    const top = candidates[0];
+
+    if (!top) {
+      return res.json({
+        insight: "All systems steady. Nothing urgent to flag right now.",
+        severity: "info",
+        reason: "No strong signals",
+        source: "healthy",
+      });
+    }
+
+    res.json(top);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── System Recommendations — pattern-based agent/cron/skill suggestions ────
 
 router.get("/recommendations", async (_req, res) => {

@@ -115,6 +115,7 @@ export const api = {
   getAgentStatus: () => req<any[]>("GET", "/api/agents/status"),
   getExecutions: () => req<any[]>("GET", "/api/agents/executions"),
   getRecommendations: () => req<any[]>("GET", "/api/agents/recommendations"),
+  getActiveInsight: () => req<any>("GET", "/api/agents/active-insight"),
   acceptRecommendation: (action: any) => req<any>("POST", "/api/agents/recommendations/accept", { action }),
 
   // Advisor
