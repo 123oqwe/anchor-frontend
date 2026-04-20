@@ -145,8 +145,8 @@ export function registerBuiltinTools(): void {
 
   registerTool({
     name: "create_calendar_event",
-    description: "Create a calendar event in the user's Apple Calendar. No API key needed.",
-    handler: "shell",
+    description: "Create a calendar event. Dispatches through the Hand bridge → gcal-rest (Google Calendar API) with future Apple Calendar Shortcuts fallback.",
+    handler: "api",
     actionClass: "modify_calendar",
     inputSchema: {
       type: "object",
@@ -155,39 +155,27 @@ export function registerBuiltinTools(): void {
         date: { type: "string", description: "Date (YYYY-MM-DD)" },
         time: { type: "string", description: "Start time (HH:MM, 24h format)" },
         duration_minutes: { type: "number", description: "Duration in minutes (default 60)" },
+        description: { type: "string" },
+        location: { type: "string" },
+        attendees: { type: "array", items: { type: "string" } },
       },
       required: ["title", "date"],
     },
-    execute: async (input): Promise<ToolResult> => {
-      try {
-        const time = input.time ?? "09:00";
-        const duration = input.duration_minutes ?? 60;
-        const [year, month, day] = input.date.split("-").map(Number);
-        const [hour, minute] = time.split(":").map(Number);
-
-        const script = `
-tell application "Calendar"
-  tell calendar "Calendar"
-    set startDate to current date
-    set year of startDate to ${year}
-    set month of startDate to ${month}
-    set day of startDate to ${day}
-    set hours of startDate to ${hour}
-    set minutes of startDate to ${minute}
-    set seconds of startDate to 0
-    set endDate to startDate + ${duration} * minutes
-    make new event with properties {summary:"${input.title.replace(/"/g, '\\"')}", start date:startDate, end date:endDate}
-  end tell
-end tell`;
-        const result = runAppleScript(script);
-        if (result === null) {
-          return { success: false, output: "Calendar permission denied. Grant access in System Settings → Privacy → Calendar." };
-        }
-        logExecution("Execution Agent", `Calendar event: ${input.title} on ${input.date}`);
-        return { success: true, output: `Event "${input.title}" created on ${input.date} at ${time} (${duration}min).` };
-      } catch (err: any) {
-        return { success: false, output: `Calendar error: ${err.message}`, error: err.message };
-      }
+    execute: async (input, ctx): Promise<ToolResult> => {
+      const { dispatchCapability } = await import("../bridges/registry.js");
+      // Translate snake_case input to bridge capability shape
+      const bridgeInput = {
+        title: input.title, date: input.date, time: input.time,
+        durationMinutes: input.duration_minutes, description: input.description,
+        location: input.location, attendees: input.attendees,
+      };
+      const r = await dispatchCapability("calendar.create_event", bridgeInput, ctx);
+      if (!r.success) return { success: false, output: r.output, error: r.error };
+      logExecution("Execution Agent", `Calendar event via ${r.providerId}: ${input.title} on ${input.date}`);
+      return {
+        success: true, output: r.output,
+        data: { ...(r.data ?? {}), providerId: r.providerId },
+      };
     },
   });
 

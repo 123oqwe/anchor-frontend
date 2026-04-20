@@ -15,6 +15,7 @@ import {
 } from "../bridges/registry.js";
 import { cachedHealthCheck } from "../bridges/health.js";
 import { getAttemptsForRun, getProviderHealthHistory } from "../bridges/telemetry.js";
+import { listAppApprovals, approveApp, denyApp, revokeApp } from "../bridges/app-approval.js";
 
 const router = Router();
 
@@ -95,6 +96,52 @@ router.post("/preferences", (req, res) => {
   if (Array.isArray(disabled)) {
     setProviderDisabled(capability, disabled.filter(s => typeof s === "string"));
   }
+  res.json({ ok: true });
+});
+
+// ── Direct dispatch (admin debugging — bypasses Custom Agent / ReAct path) ──
+router.post("/dispatch", async (req, res) => {
+  const { capability, input, runId } = req.body ?? {};
+  if (typeof capability !== "string" || !input) {
+    return res.status(400).json({ error: "capability (string) and input (object) required" });
+  }
+  const { dispatchCapability } = await import("../bridges/registry.js");
+  const ctx = {
+    previousResults: [],
+    stepIndex: 0,
+    totalSteps: 1,
+    runId: typeof runId === "string" ? runId : undefined,
+  };
+  const result = await dispatchCapability(capability, input, ctx, "user_triggered");
+  res.json(result);
+});
+
+// User-cron runtime status
+router.get("/cron-runtime-status", async (_req, res) => {
+  const { getScheduledCronStatus } = await import("../orchestration/user-cron-runtime.js");
+  res.json(getScheduledCronStatus());
+});
+
+// ── Codex-style App Approvals (per-app authorization) ───────────────────────
+
+router.get("/app-approvals", (_req, res) => {
+  res.json(listAppApprovals());
+});
+
+router.post("/app-approvals/:app/approve", (req, res) => {
+  const scope = (req.body?.scope as string) ?? "full";
+  approveApp(decodeURIComponent(req.params.app), scope as any);
+  res.json({ ok: true });
+});
+
+router.post("/app-approvals/:app/deny", (req, res) => {
+  const scope = (req.body?.scope as string) ?? "full";
+  denyApp(decodeURIComponent(req.params.app), scope as any);
+  res.json({ ok: true });
+});
+
+router.delete("/app-approvals/:app", (req, res) => {
+  revokeApp(decodeURIComponent(req.params.app));
   res.json({ ok: true });
 });
 
