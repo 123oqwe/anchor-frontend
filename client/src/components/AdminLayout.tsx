@@ -11,6 +11,7 @@ const adminNav = [
   { path: "/admin/performance", label: "Performance", icon: Zap, group: "AI Layer" },
   { path: "/admin/logs", label: "Logs", icon: Activity, group: "AI Layer" },
   { path: "/admin/runs", label: "Run Traces", icon: RouteIcon, group: "AI Layer" },
+  { path: "/admin/bridges-advanced", label: "Hand Bridge", icon: Zap, group: "AI Layer" },
   { path: "/admin/health", label: "System Health", icon: HeartPulse, group: "AI Layer" },
   { path: "/admin/graph", label: "Human Graph", icon: Network, group: "Data Layer" },
   { path: "/admin/memory", label: "Memory & Twin", icon: Brain, group: "Data Layer" },

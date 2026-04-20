@@ -95,8 +95,45 @@ export function setProviderDisabled(capabilityName: string, providerIds: string[
 
 // ── Dispatch ─────────────────────────────────────────────────────────────────
 
-/** Default order for Codex-style Action Hierarchy: structured API > script > vision. */
-const KIND_PRIORITY: Record<string, number> = { cli: 0, mcp: 1, vision: 2 };
+/**
+ * Dispatch priority — ordered by user SETUP FRICTION, not transport kind.
+ *
+ * Jobs principle: the user is already logged into Mail.app, Calendar.app, and
+ * Chrome. Don't ask them to OAuth again. Put zero-setup paths first so first
+ * launch just works.
+ *
+ *  Tier 0 — already-logged-in native app (AppleScript Mail/Calendar/iMessage)
+ *  Tier 1 — already-logged-in browser profile (Playwright + Chrome userDataDir)
+ *  Tier 2 — already-logged-in MCP tooling (Claude Code / Playwright MCP)
+ *  Tier 3 — OAuth / API keys (requires the user to click Connect)
+ *  Tier 4 — Vision fallback (Codex-style, last resort)
+ */
+function setupTierOf(p: ProviderDef): number {
+  // Explicit per-id overrides first (these are the zero-setup providers)
+  const tier0 = new Set([
+    "applemail-applescript", "applecalendar-applescript",
+    "applereminders-applescript", "imessage-applescript",
+  ]);
+  if (tier0.has(p.id)) return 0;
+
+  if (p.id.startsWith("browser-profile-")) return 1;
+
+  // MCP tooling the user either has installed (claude) or gets via npx
+  if (p.kind === "mcp") return 2;
+
+  // OAuth/API: any provider declaring it needs OAuth
+  if (p.requires?.oauth) return 3;
+  if (p.requires?.apiToken) return 3;
+
+  // Shortcuts-based providers require the user to import a .shortcut first
+  if (p.requires?.shortcuts && p.requires.shortcuts.length > 0) return 3;
+
+  // Vision always last
+  if (p.kind === "vision") return 4;
+
+  // Remaining CLI with no extra requirements → tier 0.5 (zero-setup, not native)
+  return 0;
+}
 
 function orderProviders(
   compatible: ProviderDef[],
@@ -114,9 +151,9 @@ function orderProviders(
     if (p && !seen.has(id)) { ordered.push(p); seen.add(id); }
   }
 
-  // Remaining providers: Action Hierarchy — CLI (tier 1) → MCP (tier 2) → Vision (tier 3 fallback)
+  // Remaining providers: by setup tier (0 is zero-friction, 4 is last-resort)
   const rest = active.filter(p => !seen.has(p.id));
-  rest.sort((a, b) => (KIND_PRIORITY[a.kind] ?? 99) - (KIND_PRIORITY[b.kind] ?? 99));
+  rest.sort((a, b) => setupTierOf(a) - setupTierOf(b));
   ordered.push(...rest);
 
   return ordered;

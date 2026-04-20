@@ -27,6 +27,7 @@ import MemoryAdmin from "./pages/admin/Memory";
 import Health from "./pages/admin/Health";
 import Runs from "./pages/admin/Runs";
 import RunTrace from "./pages/admin/RunTrace";
+import BridgesAdvanced from "./pages/admin/BridgesAdvanced";
 
 function Router() {
   return (
@@ -42,6 +43,7 @@ function Router() {
       <Route path="/admin/health"><AdminLayout><Health /></AdminLayout></Route>
       <Route path="/admin/runs"><AdminLayout><Runs /></AdminLayout></Route>
       <Route path="/admin/runs/:runId"><AdminLayout><RunTrace /></AdminLayout></Route>
+      <Route path="/admin/bridges-advanced"><AdminLayout><BridgesAdvanced /></AdminLayout></Route>
 
       {/* Onboarding — skip if already completed */}
       <Route path="/">

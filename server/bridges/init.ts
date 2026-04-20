@@ -6,6 +6,14 @@ import { registerCapability, registerProvider } from "./registry.js";
 import { ALL_CAPABILITIES } from "./capabilities/index.js";
 
 // CLI providers
+// Tier 0 — already-logged-in native apps (zero setup on macOS)
+import { appleMailAppleScriptProvider } from "./providers/cli/applemail-applescript.js";
+import { appleCalendarAppleScriptProvider } from "./providers/cli/applecalendar-applescript.js";
+
+// Tier 1 — already-logged-in browser profile
+import { browserProfileGmailProvider } from "./providers/cli/browser-profile.js";
+
+// Tier 3 — OAuth / Shortcuts / API providers (require user to click Connect)
 import { gmailRestProvider } from "./providers/cli/gmail-rest.js";
 import { gcalRestProvider } from "./providers/cli/gcal-rest.js";
 import { appleMailShortcutsProvider } from "./providers/cli/shortcuts-cli.js";
@@ -24,7 +32,14 @@ export function initBridges(): void {
   // 1. Register all capabilities
   for (const cap of ALL_CAPABILITIES) registerCapability(cap);
 
-  // 2. Register CLI providers (Tier 1 — structured API / one-shot subprocess)
+  // 2a. Tier 0 — already-logged-in native apps (zero setup)
+  registerProvider(appleMailAppleScriptProvider);
+  registerProvider(appleCalendarAppleScriptProvider);
+
+  // 2b. Tier 1 — already-logged-in browser profile
+  registerProvider(browserProfileGmailProvider);
+
+  // 2c. Tier 3 — OAuth / Shortcuts / API (user-facing Connect button)
   registerProvider(gmailRestProvider);
   registerProvider(gcalRestProvider);
   registerProvider(appleMailShortcutsProvider);
@@ -39,8 +54,12 @@ export function initBridges(): void {
   registerProvider(playwrightVisionProvider);
   registerProvider(macosVisionProvider);
 
-  const cli = 5, mcp = 2, vis = 2;
+  const cli = 8, mcp = 2, vis = 2;
   console.log(`🌉 Bridges initialized — ${ALL_CAPABILITIES.length} capabilities × ${cli + mcp + vis} providers (${cli} CLI + ${mcp} MCP + ${vis} Vision)`);
+  console.log(`   Tier 0 (zero-setup native): apple-mail, apple-calendar`);
+  console.log(`   Tier 1 (browser profile): gmail-via-chrome`);
+  console.log(`   Tier 3 (OAuth/API):       gmail-rest, gcal-rest, shortcuts, playwright-cli, claude-cli, claude-code-mcp, playwright-mcp`);
+  console.log(`   Tier 4 (vision fallback): playwright-vision, macos-vision`);
 
   // Graceful shutdown: kill long-lived MCP subprocesses
   const shutdown = () => {
