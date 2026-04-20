@@ -55,7 +55,7 @@ interface FnResult<T> {
 async function withFallback<T>(
   task: string,
   fn: (model: Model) => Promise<FnResult<T>>,
-  telemetryMeta?: { inputPreview?: string }
+  telemetryMeta?: { inputPreview?: string; runId?: string; agentName?: string }
 ): Promise<T> {
   const route = TASK_ROUTES[task];
   if (!route) throw new Error(`Unknown task: ${task}`);
@@ -97,6 +97,8 @@ async function withFallback<T>(
         status: i > 0 ? "fallback" : "success",
         requestPreview: telemetryMeta?.inputPreview?.slice(0, 500),
         responsePreview: res.responsePreview?.slice(0, 500),
+        runId: telemetryMeta?.runId,
+        agentName: telemetryMeta?.agentName,
       });
       return res.value;
     } catch (err: any) {
@@ -111,6 +113,8 @@ async function withFallback<T>(
         status: "failed",
         error: msg,
         requestPreview: telemetryMeta?.inputPreview?.slice(0, 500),
+        runId: telemetryMeta?.runId,
+        agentName: telemetryMeta?.agentName,
       });
       if (i === candidates.length - 1) throw err;
     }
@@ -128,6 +132,8 @@ export async function text(opts: {
   system: string;
   messages: { role: "user" | "assistant"; content: string }[];
   maxTokens?: number;
+  runId?: string;       // OPT-4: trace correlation
+  agentName?: string;   // OPT-4: which agent called this LLM
 }): Promise<string> {
   const lastMsg = opts.messages[opts.messages.length - 1]?.content ?? "";
   return withFallback<string>(opts.task, async (model) => {
@@ -146,7 +152,7 @@ export async function text(opts: {
       },
       responsePreview: result.text,
     };
-  }, { inputPreview: lastMsg });
+  }, { inputPreview: lastMsg, runId: opts.runId, agentName: opts.agentName });
 }
 
 /**

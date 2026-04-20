@@ -281,4 +281,68 @@ router.post("/diagnostic/run", (_req, res) => {
   }
 });
 
+// ── OPT-4: Agent Run Trace ─────────────────────────────────────────────────
+
+// List recent runs (across all agents)
+router.get("/runs", (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit as string) || 30, 100);
+  const rows = db.prepare(`
+    SELECT DISTINCT run_id,
+      (SELECT MIN(created_at) FROM agent_executions WHERE run_id=e.run_id) as started_at,
+      (SELECT MAX(created_at) FROM agent_executions WHERE run_id=e.run_id) as finished_at,
+      (SELECT COUNT(*) FROM agent_executions WHERE run_id=e.run_id) as tool_count,
+      (SELECT COUNT(*) FROM llm_calls WHERE run_id=e.run_id) as llm_count,
+      (SELECT COALESCE(SUM(cost_usd),0) FROM llm_calls WHERE run_id=e.run_id) as cost,
+      (SELECT agent_name FROM llm_calls WHERE run_id=e.run_id LIMIT 1) as agent_name
+    FROM agent_executions e
+    WHERE run_id IS NOT NULL
+    ORDER BY started_at DESC LIMIT ?
+  `).all(limit);
+  res.json(rows);
+});
+
+// Full trace for a specific run
+router.get("/runs/:runId/trace", (req, res) => {
+  const runId = req.params.runId;
+
+  const toolCalls = db.prepare(
+    "SELECT id, agent, action, status, created_at FROM agent_executions WHERE run_id=? ORDER BY created_at"
+  ).all(runId) as any[];
+
+  const llmCalls = db.prepare(
+    "SELECT id, task, model_id, provider_id, input_tokens, output_tokens, cost_usd, latency_ms, status, request_preview, response_preview, created_at FROM llm_calls WHERE run_id=? ORDER BY created_at"
+  ).all(runId) as any[];
+
+  if (toolCalls.length === 0 && llmCalls.length === 0) {
+    return res.status(404).json({ error: "Run not found" });
+  }
+
+  // Merge into unified timeline
+  const timeline = [
+    ...toolCalls.map((t: any) => ({ type: "tool", ...t, ts: t.created_at })),
+    ...llmCalls.map((l: any) => ({ type: "llm", ...l, ts: l.created_at })),
+  ].sort((a: any, b: any) => a.ts.localeCompare(b.ts));
+
+  const totalCost = llmCalls.reduce((s: number, l: any) => s + (l.cost_usd ?? 0), 0);
+  const totalTokens = llmCalls.reduce((s: number, l: any) => s + (l.input_tokens ?? 0) + (l.output_tokens ?? 0), 0);
+  const startedAt = timeline[0]?.ts;
+  const finishedAt = timeline[timeline.length - 1]?.ts;
+  const durationMs = startedAt && finishedAt
+    ? new Date(finishedAt).getTime() - new Date(startedAt).getTime()
+    : 0;
+
+  res.json({
+    runId,
+    startedAt,
+    finishedAt,
+    durationMs,
+    agentName: llmCalls[0]?.agent_name ?? "Unknown",
+    totalCost,
+    totalTokens,
+    toolCount: toolCalls.length,
+    llmCount: llmCalls.length,
+    timeline,
+  });
+});
+
 export default router;

@@ -489,6 +489,13 @@ try { db.exec("ALTER TABLE skills ADD COLUMN source TEXT NOT NULL DEFAULT 'dream
 try { db.exec("ALTER TABLE graph_edges ADD COLUMN valid_from TEXT"); } catch {}
 try { db.exec("ALTER TABLE graph_edges ADD COLUMN valid_to TEXT"); } catch {}
 
+// OPT-4: run_id for trace correlation across tools + LLM calls
+try { db.exec("ALTER TABLE agent_executions ADD COLUMN run_id TEXT"); } catch {}
+try { db.exec("ALTER TABLE llm_calls ADD COLUMN run_id TEXT"); } catch {}
+try { db.exec("ALTER TABLE llm_calls ADD COLUMN agent_name TEXT"); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_exec_run ON agent_executions(run_id)"); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_llm_run ON llm_calls(run_id)"); } catch {}
+
 seedIfEmpty();
 
 /** Shared agent execution logger — replaces duplicate log() in 19 files. */

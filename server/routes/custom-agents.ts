@@ -77,6 +77,8 @@ router.post("/custom/:id/run", async (req, res) => {
   const { message } = req.body;
   if (!message) return res.status(400).json({ error: "message required" });
 
+  const runId = nanoid();  // OPT-4: trace correlation
+
   try {
     const graphContext = serializeForPrompt();
 
@@ -96,10 +98,13 @@ router.post("/custom/:id/run", async (req, res) => {
       system: systemPrompt,
       messages: [{ role: "user", content: message }],
       maxTokens: 2000,
+      runId,
+      agentName: `Custom: ${agent.name}`,
     });
 
-    // Log execution
-    logExecution(`Custom: ${agent.name}`, message.slice(0, 100), "success");
+    // Log execution with run_id for trace
+    db.prepare("INSERT INTO agent_executions (id, user_id, agent, action, status, run_id) VALUES (?,?,?,?,?,?)")
+      .run(nanoid(), DEFAULT_USER_ID, `Custom: ${agent.name}`, message.slice(0, 100), "success", runId);
 
     // Save result as episodic memory (so next run has context)
     writeMemory({
@@ -114,10 +119,10 @@ router.post("/custom/:id/run", async (req, res) => {
     // Extract insights into graph (non-blocking, fires async internally)
     extractFromMessage(result);
 
-    const runId = nanoid();
     res.json({ id: runId, content: result, agentName: agent.name });
   } catch (err: any) {
-    logExecution(`Custom: ${agent.name}`, message.slice(0, 100), "failed");
+    db.prepare("INSERT INTO agent_executions (id, user_id, agent, action, status, run_id) VALUES (?,?,?,?,?,?)")
+      .run(nanoid(), DEFAULT_USER_ID, `Custom: ${agent.name}`, message.slice(0, 100), "failed", runId);
     res.status(500).json({ error: err.message });
   }
 });

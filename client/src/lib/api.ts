@@ -146,6 +146,8 @@ export const api = {
   getDiagnosticReport: () => req<any>("GET", "/api/admin/diagnostic"),
   runDiagnostic: () => req<any>("POST", "/api/admin/diagnostic/run"),
   getSystemHealth: () => req<any>("GET", "/api/admin/health"),
+  getRecentRuns: (limit = 30) => req<any[]>("GET", `/api/admin/runs?limit=${limit}`),
+  getRunTrace: (runId: string) => req<any>("GET", `/api/admin/runs/${runId}/trace`),
   getOverrides: () => req<Record<string, string>>("GET", "/api/admin/overrides"),
   setOverride: (task: string, modelId: string) => req("PUT", `/api/admin/overrides/${task}`, { modelId }),
   clearOverride: (task: string) => req("DELETE", `/api/admin/overrides/${task}`),

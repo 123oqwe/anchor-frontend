@@ -17,6 +17,8 @@ export interface CallLogInput {
   error?: string;
   requestPreview?: string;
   responsePreview?: string;
+  runId?: string;      // OPT-4: trace correlation
+  agentName?: string;  // OPT-4: which agent called this LLM
 }
 
 export function logCall(input: CallLogInput): void {
@@ -27,8 +29,8 @@ export function logCall(input: CallLogInput): void {
   db.prepare(
     `INSERT INTO llm_calls
      (id, task, capability, model_id, provider_id, input_tokens, output_tokens,
-      cost_usd, latency_ms, status, error, request_preview, response_preview)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      cost_usd, latency_ms, status, error, request_preview, response_preview, run_id, agent_name)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     nanoid(),
     input.task,
@@ -43,6 +45,8 @@ export function logCall(input: CallLogInput): void {
     input.error ?? null,
     input.requestPreview ?? null,
     input.responsePreview ?? null,
+    input.runId ?? null,
+    input.agentName ?? null,
   );
 }
 

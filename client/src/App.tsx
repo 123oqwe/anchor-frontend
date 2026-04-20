@@ -25,6 +25,8 @@ import Performance from "./pages/admin/Performance";
 import GraphAdmin from "./pages/admin/Graph";
 import MemoryAdmin from "./pages/admin/Memory";
 import Health from "./pages/admin/Health";
+import Runs from "./pages/admin/Runs";
+import RunTrace from "./pages/admin/RunTrace";
 
 function Router() {
   return (
@@ -38,6 +40,8 @@ function Router() {
       <Route path="/admin/memory"><AdminLayout><MemoryAdmin /></AdminLayout></Route>
       <Route path="/admin/data"><AdminLayout><Data /></AdminLayout></Route>
       <Route path="/admin/health"><AdminLayout><Health /></AdminLayout></Route>
+      <Route path="/admin/runs"><AdminLayout><Runs /></AdminLayout></Route>
+      <Route path="/admin/runs/:runId"><AdminLayout><RunTrace /></AdminLayout></Route>
 
       {/* Onboarding — skip if already completed */}
       <Route path="/">
