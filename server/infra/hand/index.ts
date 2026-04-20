@@ -73,6 +73,32 @@ function registerBridgeTools(): void {
     },
   });
 
+  // ── Browser stateful (MCP, for login flows) ───────────────────────────────
+  registerTool({
+    name: "browser_session",
+    description: "Stateful browser interaction (login session persists). Action: navigate|click|fill|extract|screenshot. Uses Playwright MCP.",
+    handler: "browser",
+    actionClass: "browser_action",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["navigate", "click", "fill", "extract", "screenshot"] },
+        url: { type: "string" },
+        selector: { type: "string" },
+        text: { type: "string" },
+      },
+      required: ["action"],
+    },
+    execute: async (input, ctx): Promise<ToolResult> => {
+      const { dispatchCapability } = await import("../../bridges/registry.js");
+      const r = await dispatchCapability("browser.session", input, ctx);
+      return {
+        success: r.success, output: r.output, error: r.error,
+        data: { ...(r.data ?? {}), providerId: r.providerId },
+      };
+    },
+  });
+
   // ── Dev delegate ──────────────────────────────────────────────────────────
   registerTool({
     name: "delegate_to_claude_code",

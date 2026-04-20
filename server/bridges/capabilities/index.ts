@@ -39,6 +39,24 @@ export const browserNavigate: CapabilityDef = {
   },
 };
 
+export const browserSession: CapabilityDef = {
+  name: "browser.session",
+  description: "Multi-step browser interaction with persistent session (login, click, fill, extract). Uses MCP for stateful transport.",
+  actionClass: "browser_action",
+  inputSchema: {
+    type: "object",
+    properties: {
+      action: { type: "string", enum: ["navigate", "click", "fill", "extract", "screenshot"] },
+      url: { type: "string" },
+      selector: { type: "string" },
+      text: { type: "string" },
+      toolName: { type: "string", description: "Override: name of MCP tool to call" },
+      arguments: { type: "object", description: "Override: raw arguments to pass to MCP tool" },
+    },
+    required: ["action"],
+  },
+};
+
 export const devDelegate: CapabilityDef = {
   name: "dev.delegate",
   description: "Delegate a coding task to Claude Code. Use when Anchor needs real code editing, refactoring, or debugging.",
@@ -60,5 +78,6 @@ export const devDelegate: CapabilityDef = {
 export const ALL_CAPABILITIES: CapabilityDef[] = [
   emailSend,
   browserNavigate,
+  browserSession,
   devDelegate,
 ];
