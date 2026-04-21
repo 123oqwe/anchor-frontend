@@ -21,6 +21,7 @@ import { startCronJobs } from "./orchestration/cron.js";
 import { startEventTriggers, startWatchersFromAgents } from "./orchestration/event-triggers.js";
 import { startUserCronRuntime } from "./orchestration/user-cron-runtime.js";
 import { startTaskBrain } from "./orchestration/task-brain.js";
+import { startCloudRelay } from "./cloud/relay-client.js";
 
 // Route handlers
 import userRoutes from "./routes/user.js";
@@ -106,6 +107,7 @@ async function startServer() {
   startWatchersFromAgents().catch(() => {});     // OPT-2: start file/idle watchers if agents need them
   startTaskBrain();                              // P4: agent_jobs ledger worker (claim/execute/retry)
   startUserCronRuntime();                        // user_crons scheduler (enqueues to Task Brain on fire)
+  startCloudRelay();                             // MVP2: opt-in outbound WS to Anchor Cloud (multi-device)
 
   // ── WebSocket — real-time event push to frontend ───────────────────────────
   const wss = new WebSocketServer({ server, path: "/ws" });
