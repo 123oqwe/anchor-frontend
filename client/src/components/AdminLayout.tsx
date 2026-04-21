@@ -2,7 +2,7 @@ import { type ReactNode } from "react";
 import { useLocation, Link } from "wouter";
 import {
   Cpu, Activity, Database, ArrowLeft, Terminal,
-  DollarSign, Zap, Network, Brain, HeartPulse, Route as RouteIcon,
+  DollarSign, Zap, Network, Brain, HeartPulse, Route as RouteIcon, ListTodo, Webhook, Share2,
 } from "lucide-react";
 
 const adminNav = [
@@ -11,6 +11,9 @@ const adminNav = [
   { path: "/admin/performance", label: "Performance", icon: Zap, group: "AI Layer" },
   { path: "/admin/logs", label: "Logs", icon: Activity, group: "AI Layer" },
   { path: "/admin/runs", label: "Run Traces", icon: RouteIcon, group: "AI Layer" },
+  { path: "/admin/jobs", label: "Jobs", icon: ListTodo, group: "AI Layer" },
+  { path: "/admin/missions", label: "Missions", icon: Share2, group: "AI Layer" },
+  { path: "/admin/hooks", label: "Hooks", icon: Webhook, group: "AI Layer" },
   { path: "/admin/bridges-advanced", label: "Hand Bridge", icon: Zap, group: "AI Layer" },
   { path: "/admin/health", label: "System Health", icon: HeartPulse, group: "AI Layer" },
   { path: "/admin/graph", label: "Human Graph", icon: Network, group: "Data Layer" },

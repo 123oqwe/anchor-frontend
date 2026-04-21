@@ -29,6 +29,10 @@ import Health from "./pages/admin/Health";
 import Runs from "./pages/admin/Runs";
 import RunTrace from "./pages/admin/RunTrace";
 import BridgesAdvanced from "./pages/admin/BridgesAdvanced";
+import Jobs from "./pages/admin/Jobs";
+import Hooks from "./pages/admin/Hooks";
+import Missions from "./pages/admin/Missions";
+import MissionDetail from "./pages/admin/MissionDetail";
 
 function Router() {
   return (
@@ -45,6 +49,10 @@ function Router() {
       <Route path="/admin/runs"><AdminLayout><Runs /></AdminLayout></Route>
       <Route path="/admin/runs/:runId"><AdminLayout><RunTrace /></AdminLayout></Route>
       <Route path="/admin/bridges-advanced"><AdminLayout><BridgesAdvanced /></AdminLayout></Route>
+      <Route path="/admin/jobs"><AdminLayout><Jobs /></AdminLayout></Route>
+      <Route path="/admin/hooks"><AdminLayout><Hooks /></AdminLayout></Route>
+      <Route path="/admin/missions"><AdminLayout><Missions /></AdminLayout></Route>
+      <Route path="/admin/missions/:id"><AdminLayout><MissionDetail /></AdminLayout></Route>
 
       {/* Onboarding — skip if already completed */}
       <Route path="/">

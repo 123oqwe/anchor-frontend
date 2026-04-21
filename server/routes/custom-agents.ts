@@ -152,6 +152,141 @@ router.post("/custom/:id/run", async (req, res) => {
   }
 });
 
+// ══ P12: agentskills.io export/import ══════════════════════════════════════
+
+/**
+ * Export a crystallized agent_skill as a SKILL.md file (agentskills.io format).
+ * Frontmatter carries name/description/metadata; body wraps the code template
+ * in a fenced block so humans can read it and other agents can re-parse it.
+ */
+router.get("/custom/:id/skills/:name/export", (req, res) => {
+  const skill = db.prepare(
+    "SELECT * FROM agent_skills WHERE agent_id=? AND name=?"
+  ).get(req.params.id, req.params.name) as any;
+  if (!skill) return res.status(404).json({ error: "Skill not found" });
+
+  const agent = db.prepare("SELECT name FROM user_agents WHERE id=? AND user_id=?").get(req.params.id, DEFAULT_USER_ID) as any;
+
+  // Minimal YAML — single-line string values are safe for the fields we emit.
+  const frontmatter = [
+    `name: ${skill.name}`,
+    `description: ${JSON.stringify(skill.description)}`,  // quote to survive colons/commas
+    `license: Apache-2.0`,
+    `metadata:`,
+    `  author: anchor`,
+    `  source_agent: ${agent?.name ?? "unknown"}`,
+    `  lang: ${skill.lang}`,
+    `  success_count: ${skill.success_count}`,
+    `  origin: anchor_skill_extractor`,
+    `  signature: ${skill.signature}`,
+  ].join("\n");
+
+  const body = [
+    `# ${skill.name}`,
+    ``,
+    skill.description,
+    ``,
+    `## Code template`,
+    ``,
+    `\`\`\`${skill.lang}`,
+    skill.template,
+    `\`\`\``,
+    ``,
+    `_Crystallized by Anchor from ${skill.success_count} successful runs. Compatible with agentskills.io v1._`,
+  ].join("\n");
+
+  const content = `---\n${frontmatter}\n---\n\n${body}\n`;
+
+  res.json({
+    content,
+    filename: `${skill.name}.SKILL.md`,
+  });
+});
+
+/**
+ * Import a SKILL.md — parse minimal YAML frontmatter + fenced code block,
+ * insert into agent_skills for this agent. Name collisions auto-suffixed.
+ */
+router.post("/custom/:id/skills/import", (req, res) => {
+  const agent = db.prepare("SELECT id FROM user_agents WHERE id=? AND user_id=?").get(req.params.id, DEFAULT_USER_ID) as any;
+  if (!agent) return res.status(404).json({ error: "Agent not found" });
+  const content = String(req.body?.content ?? "");
+  if (!content) return res.status(400).json({ error: "content (SKILL.md) required" });
+
+  const parsed = parseSkillMd(content);
+  if (!parsed.name) return res.status(400).json({ error: "Frontmatter missing 'name'" });
+  if (!parsed.template) return res.status(400).json({ error: "No fenced code block found" });
+
+  const signature = parsed.signature || `imported_${nanoid(8)}`;
+
+  // Idempotent: same (agent_id, signature) → bump success_count, don't duplicate.
+  const existing = db.prepare(
+    "SELECT id, name FROM agent_skills WHERE agent_id=? AND signature=?"
+  ).get(req.params.id, signature) as any;
+  if (existing) {
+    db.prepare(
+      "UPDATE agent_skills SET success_count=success_count+1, last_used_at=datetime('now') WHERE id=?"
+    ).run(existing.id);
+    return res.json({ id: existing.id, name: existing.name, alreadyExisted: true });
+  }
+
+  // Handle name collisions (different signature but same name) by suffixing.
+  let finalName = parsed.name;
+  let suffix = 1;
+  while (db.prepare("SELECT 1 FROM agent_skills WHERE agent_id=? AND name=?").get(req.params.id, finalName)) {
+    suffix++;
+    finalName = `${parsed.name}_${suffix}`;
+    if (suffix > 100) return res.status(400).json({ error: "Too many name collisions" });
+  }
+
+  const id = nanoid();
+  db.prepare(
+    "INSERT INTO agent_skills (id, agent_id, name, description, signature, template, lang, success_count, last_used_at) VALUES (?,?,?,?,?,?,?,?,datetime('now'))"
+  ).run(
+    id, req.params.id, finalName, parsed.description,
+    signature,
+    parsed.template, parsed.lang || "python",
+    parsed.successCount ?? 0
+  );
+  res.json({ id, name: finalName });
+});
+
+/** Minimal SKILL.md parser — no YAML dep. Handles the shape we export + common cases. */
+function parseSkillMd(md: string): {
+  name?: string; description?: string; lang?: string;
+  template?: string; signature?: string; successCount?: number;
+} {
+  const fm = md.match(/^---\s*\n([\s\S]*?)\n---\s*\n/);
+  const out: any = {};
+  if (fm) {
+    const lines = fm[1].split("\n");
+    for (const line of lines) {
+      const m = line.match(/^(\s*)([a-zA-Z_][a-zA-Z_0-9]*)\s*:\s*(.*)$/);
+      if (!m) continue;
+      const indent = m[1].length;
+      const key = m[2];
+      let value = m[3].trim();
+      if (value.startsWith('"') && value.endsWith('"')) value = JSON.parse(value);
+      if (indent === 0) {
+        if (key === "name") out.name = value;
+        else if (key === "description") out.description = value;
+      } else {
+        // Nested under metadata:
+        if (key === "lang") out.lang = value;
+        else if (key === "success_count") out.successCount = Number(value) || 0;
+        else if (key === "signature") out.signature = value;
+      }
+    }
+  }
+  // First fenced code block
+  const code = md.match(/```([a-zA-Z]+)?\n([\s\S]*?)\n```/);
+  if (code) {
+    out.template = code[2];
+    if (!out.lang && code[1]) out.lang = code[1];
+  }
+  return out;
+}
+
 // ══ P8: Agent Inspector ═════════════════════════════════════════════════════
 
 /** List files in agent's workspace directory (non-recursive, with size + mtime). */

@@ -174,6 +174,35 @@ export const api = {
   getAgentSkills: (id: string) => req<{ name: string; description: string; lang: string; template: string; successCount: number }[]>("GET", `/api/agents/custom/${id}/skills`),
   getAgentRuns: (id: string, limit = 20) => req<any[]>("GET", `/api/agents/custom/${id}/runs?limit=${limit}`),
 
+  // P9 Jobs Dashboard
+  getJobs: (params: { state?: string; source?: string; limit?: number } = {}) => {
+    const q = new URLSearchParams();
+    if (params.state) q.set("state", params.state);
+    if (params.source) q.set("source", params.source);
+    if (params.limit) q.set("limit", String(params.limit));
+    return req<any[]>("GET", `/api/jobs?${q.toString()}`);
+  },
+  getJob: (id: string) => req<any>("GET", `/api/jobs/${id}`),
+  cancelJob: (id: string) => req<{ ok: boolean }>("POST", `/api/jobs/${id}/cancel`, {}),
+  retryJob: (id: string) => req<{ ok: boolean }>("POST", `/api/jobs/${id}/retry`, {}),
+  enqueueJob: (data: any) => req<{ id: string }>("POST", "/api/jobs", data),
+
+  // P10 Hooks Editor
+  getHooks: () => req<any[]>("GET", "/api/hooks"),
+  createHook: (data: any) => req<{ id: string }>("POST", "/api/hooks", data),
+  updateHook: (id: string, data: any) => req<{ ok: boolean }>("PUT", `/api/hooks/${id}`, data),
+  deleteHook: (id: string) => req("DELETE", `/api/hooks/${id}`),
+
+  // P11 Mission Viewer
+  getMissions: (limit = 30) => req<any[]>("GET", `/api/missions?limit=${limit}`),
+  getMission: (id: string) => req<any>("GET", `/api/missions/${id}`),
+
+  // P12 agentskills.io
+  exportAgentSkill: (agentId: string, skillName: string) =>
+    req<{ content: string; filename: string }>("GET", `/api/agents/custom/${agentId}/skills/${encodeURIComponent(skillName)}/export`),
+  importAgentSkill: (agentId: string, skillMdContent: string) =>
+    req<{ id: string; name: string }>("POST", `/api/agents/custom/${agentId}/skills/import`, { content: skillMdContent }),
+
   // Dev proposals (agent-proposed file writes awaiting human approval)
   getProposals: () => req<any[]>("GET", "/api/agents/proposals"),
   getProposalDetail: (id: string) => req<any>("GET", `/api/agents/proposals/${id}`),

@@ -11,8 +11,9 @@ import { useParams, Link } from "wouter";
 import { motion } from "framer-motion";
 import {
   FolderOpen, FileText, Sparkles, Play, ArrowLeft, Loader2,
-  Clock, ExternalLink, RefreshCw, Terminal, Database,
+  Clock, ExternalLink, RefreshCw, Terminal, Database, Download, Upload,
 } from "lucide-react";
+import { useRef } from "react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
 
@@ -31,6 +32,7 @@ export default function AgentInspector() {
   const [loading, setLoading] = useState(true);
   const [selectedSkill, setSelectedSkill] = useState<any>(null);
   const [openingFinder, setOpeningFinder] = useState(false);
+  const importRef = useRef<HTMLInputElement>(null);
 
   const refresh = async () => {
     try {
@@ -78,6 +80,37 @@ export default function AgentInspector() {
       toast.error(err.message || "Could not open Finder");
     } finally {
       setOpeningFinder(false);
+    }
+  };
+
+  const exportSkill = async (skillName: string) => {
+    try {
+      const r = await api.exportAgentSkill(params.id, skillName);
+      const blob = new Blob([r.content], { type: "text/markdown" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = r.filename;
+      a.click();
+      URL.revokeObjectURL(url);
+      toast.success(`Exported ${r.filename}`);
+    } catch (err: any) {
+      toast.error(err.message || "Export failed");
+    }
+  };
+
+  const handleImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const text = await file.text();
+    try {
+      const r = await api.importAgentSkill(params.id, text);
+      toast.success(`Imported "${r.name}"`);
+      refresh();
+    } catch (err: any) {
+      toast.error(err.message || "Import failed");
+    } finally {
+      if (importRef.current) importRef.current.value = "";
     }
   };
 
@@ -138,7 +171,15 @@ export default function AgentInspector() {
           <div className="flex items-center gap-2 mb-3">
             <Sparkles className="h-4 w-4 text-amber-400" />
             <h2 className="text-sm font-semibold">Skills</h2>
-            <span className="text-[10px] text-muted-foreground ml-auto">{skills.length} crystallized</span>
+            <span className="text-[10px] text-muted-foreground ml-auto">{skills.length}</span>
+            <input ref={importRef} type="file" accept=".md,.SKILL.md,text/markdown" onChange={handleImport} className="hidden" />
+            <button
+              onClick={() => importRef.current?.click()}
+              className="p-1 text-muted-foreground/50 hover:text-foreground"
+              title="Import SKILL.md (agentskills.io format)"
+            >
+              <Upload className="h-3 w-3" />
+            </button>
           </div>
           {skills.length === 0 ? (
             <p className="text-xs text-muted-foreground/60 italic">
@@ -147,19 +188,32 @@ export default function AgentInspector() {
           ) : (
             <div className="space-y-1.5">
               {skills.map((s) => (
-                <button
+                <div
                   key={s.name}
-                  onClick={() => setSelectedSkill(s)}
-                  className={`w-full text-left p-2 rounded-md transition-colors ${
+                  className={`rounded-md transition-colors ${
                     selectedSkill?.name === s.name ? "bg-amber-500/10 border border-amber-500/20" : "hover:bg-white/[0.03]"
                   }`}
                 >
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-medium text-foreground">{s.name}</span>
-                    <span className="text-[10px] text-muted-foreground font-mono">{s.successCount}×</span>
-                  </div>
-                  <p className="text-[10px] text-muted-foreground mt-0.5 line-clamp-2">{s.description}</p>
-                </button>
+                  <button
+                    onClick={() => setSelectedSkill(s)}
+                    className="w-full text-left p-2 pr-1"
+                  >
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="text-xs font-medium text-foreground truncate">{s.name}</span>
+                      <div className="flex items-center gap-1 flex-shrink-0">
+                        <span className="text-[10px] text-muted-foreground font-mono">{s.successCount}×</span>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); exportSkill(s.name); }}
+                          className="p-0.5 text-muted-foreground/50 hover:text-foreground"
+                          title="Export as SKILL.md"
+                        >
+                          <Download className="h-3 w-3" />
+                        </button>
+                      </div>
+                    </div>
+                    <p className="text-[10px] text-muted-foreground mt-0.5 line-clamp-2">{s.description}</p>
+                  </button>
+                </div>
               ))}
             </div>
           )}

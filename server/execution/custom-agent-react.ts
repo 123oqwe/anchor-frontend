@@ -19,6 +19,8 @@ import { logCall } from "../infra/compute/telemetry.js";
 import { getToolsForLLM, executeTool, type ExecutionContext } from "./registry.js";
 import { renderSkillsForPrompt } from "./skill-extractor.js";
 import { fireHook } from "../orchestration/hooks.js";
+import { db, DEFAULT_USER_ID } from "../infra/storage/db.js";
+import { nanoid } from "nanoid";
 
 export interface CustomAgentToolCall {
   name: string;
@@ -141,6 +143,20 @@ export async function runCustomAgentReAct(opts: {
     run_id: opts.runId, mission_id: opts.missionId ?? opts.runId,
     user_message: opts.userMessage.slice(0, 500),
   });
+
+  // P11 — persist a trace row at start so missions/runs pages see every ReAct
+  // invocation (including handoff children and delegated subagents whose runIds
+  // otherwise wouldn't hit agent_executions directly).
+  db.prepare(
+    "INSERT INTO agent_executions (id, user_id, agent, action, status, run_id) VALUES (?,?,?,?,?,?)"
+  ).run(
+    nanoid(), DEFAULT_USER_ID,
+    `Custom: ${opts.agentName}`,
+    `ReAct start: ${opts.userMessage.slice(0, 80)}`,
+    "success",
+    opts.runId,
+  );
+
   const runStartedAt = Date.now();
 
   for (; turn < MAX_TURNS; turn++) {
