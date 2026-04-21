@@ -42,6 +42,7 @@ import mcpRoutes from "./routes/mcp.js";
 import proposalsRoutes from "./routes/proposals.js";
 import bridgesRoutes from "./routes/bridges.js";
 import jobsRoutes from "./routes/jobs.js";
+import hooksRoutes from "./routes/hooks.js";
 import bridgeLocalRoutes from "./routes/bridge-local.js";
 import anchorKernelRoutes from "./routes/anchor-kernel.js";
 import imessageRoutes from "./integrations/imessage.js";
@@ -76,6 +77,7 @@ async function startServer() {
   app.use("/api/mcp", mcpRoutes);
   app.use("/api/bridges", bridgesRoutes);
   app.use("/api/jobs", jobsRoutes);                  // Task Brain ledger
+  app.use("/api/hooks", hooksRoutes);                // P7: user hooks on events
   app.use("/local/bridge", bridgeLocalRoutes);      // subprocess → bridge (token-scoped)
   app.use("/local/anchor", anchorKernelRoutes);     // subprocess → kernel (graph/memory/state/web/think)
   app.use("/api/channels/imessage", imessageRoutes);

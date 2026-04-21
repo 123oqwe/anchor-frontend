@@ -120,6 +120,8 @@ export async function executeTool(
     // L6 trust progression: record success/failure
     if (result.success) recordSuccess(tool.actionClass);
     else recordFailure(tool.actionClass);
+    // P7 hooks — fire non-blocking
+    fireToolHook(result.success, name, input, result, latency, context).catch(() => {});
     return result;
   } catch (err: any) {
     const latency = Date.now() - start;
@@ -131,8 +133,27 @@ export async function executeTool(
     };
     logToolCall(name, input, result, latency);
     recordFailure(tool.actionClass);
+    fireToolHook(false, name, input, result, latency, context).catch(() => {});
     return result;
   }
+}
+
+// Lazy import to avoid circular (hooks → task-brain → already imports from here indirectly)
+async function fireToolHook(
+  success: boolean, tool_name: string, input: any, result: ToolResult, latency_ms: number, ctx?: ExecutionContext,
+): Promise<void> {
+  const { fireHook } = await import("../orchestration/hooks.js");
+  fireHook(success ? "tool_call_success" : "tool_call_failure", {
+    tool_name,
+    success,
+    latency_ms,
+    input,
+    output: result.output.slice(0, 400),
+    error: result.error,
+    agent_id: ctx?.agentId,
+    run_id: ctx?.runId,
+    mission_id: ctx?.missionId,
+  });
 }
 
 // ── Rollback stack (for undo on failure) ────────────────────────────────────

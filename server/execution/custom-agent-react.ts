@@ -18,6 +18,7 @@ import { getApiKey } from "../infra/compute/keys.js";
 import { logCall } from "../infra/compute/telemetry.js";
 import { getToolsForLLM, executeTool, type ExecutionContext } from "./registry.js";
 import { renderSkillsForPrompt } from "./skill-extractor.js";
+import { fireHook } from "../orchestration/hooks.js";
 
 export interface CustomAgentToolCall {
   name: string;
@@ -133,6 +134,14 @@ export async function runCustomAgentReAct(opts: {
   let turn = 0;
   let consecutiveFailures = 0;   // P5 self-eval — track error streak
   let rethinkInjected = false;   // only nudge once per run
+
+  // P7 hook — fire agent_run_start before the loop
+  fireHook("agent_run_start", {
+    agent_id: opts.agentId, agent_name: opts.agentName,
+    run_id: opts.runId, mission_id: opts.missionId ?? opts.runId,
+    user_message: opts.userMessage.slice(0, 500),
+  });
+  const runStartedAt = Date.now();
 
   for (; turn < MAX_TURNS; turn++) {
     const llmStart = Date.now();
@@ -268,6 +277,16 @@ export async function runCustomAgentReAct(opts: {
       // If synthesis fails, leave finalText empty — upstream will show fallback
     }
   }
+
+  // P7 hook — fire agent_run_end after the loop (incl. synthesis)
+  fireHook("agent_run_end", {
+    agent_id: opts.agentId, agent_name: opts.agentName,
+    run_id: opts.runId, mission_id: opts.missionId ?? opts.runId,
+    turns: turn + 1,
+    tool_call_count: toolCalls.length,
+    duration_ms: Date.now() - runStartedAt,
+    text_preview: finalText.slice(0, 300),
+  });
 
   return { text: finalText, toolCalls, turns: turn + 1 };
 }

@@ -667,6 +667,24 @@ try { db.exec(`
   )
 `); } catch {}
 
+// P7 Hooks: user-registered shell / agent callbacks on Anchor events.
+try { db.exec(`
+  CREATE TABLE IF NOT EXISTS user_hooks (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    name TEXT NOT NULL DEFAULT '',
+    event TEXT NOT NULL,
+    matcher TEXT NOT NULL DEFAULT '{}',
+    action_type TEXT NOT NULL,
+    action_config TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    last_fired_at TEXT,
+    fire_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )
+`); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_hooks_event_enabled ON user_hooks(event, enabled)"); } catch {}
+
 seedIfEmpty();
 
 /** Shared agent execution logger — replaces duplicate log() in 19 files. */
