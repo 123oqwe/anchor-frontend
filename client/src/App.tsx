@@ -17,6 +17,7 @@ import MemoryUser from "./pages/Memory";
 import Workspace from "./pages/Workspace";
 import Settings from "./pages/Settings";
 import Agents from "./pages/Agents";
+import AgentInspector from "./pages/AgentInspector";
 import Cortex from "./pages/Cortex";
 import Logs from "./pages/admin/Logs";
 import Data from "./pages/admin/Data";
@@ -58,6 +59,7 @@ function Router() {
             <Route path="/advisor" component={Advisor} />
             <Route path="/twin" component={TwinAgent} />
             <Route path="/agents" component={Agents} />
+            <Route path="/agents/:id/inspect" component={AgentInspector} />
             <Route path="/memory" component={MemoryUser} />
             <Route path="/workspace" component={Workspace} />
             <Route path="/workspace/:id" component={Workspace} />

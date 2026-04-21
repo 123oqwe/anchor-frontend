@@ -3,6 +3,9 @@
  * Each agent = persona overlay on Decision Agent (instructions + tools).
  */
 import { Router } from "express";
+import fs from "fs";
+import path from "path";
+import { spawn } from "child_process";
 import { db, DEFAULT_USER_ID, logExecution } from "../infra/storage/db.js";
 import { nanoid } from "nanoid";
 import { text } from "../infra/compute/index.js";
@@ -10,6 +13,8 @@ import { serializeForPrompt } from "../graph/reader.js";
 import { extractFromMessage } from "../cognition/extractor.js";
 import { writeMemory } from "../memory/retrieval.js";
 import { trackPlanDecision } from "../cognition/twin.js";
+import { workspacePath } from "../execution/workspace.js";
+import { listSkillsForAgent } from "../execution/skill-extractor.js";
 
 const router = Router();
 
@@ -145,6 +150,110 @@ router.post("/custom/:id/run", async (req, res) => {
       .run(nanoid(), DEFAULT_USER_ID, `Custom: ${agent.name}`, message.slice(0, 100), "failed", runId);
     res.status(500).json({ error: err.message });
   }
+});
+
+// ══ P8: Agent Inspector ═════════════════════════════════════════════════════
+
+/** List files in agent's workspace directory (non-recursive, with size + mtime). */
+router.get("/custom/:id/workspace/files", (req, res) => {
+  const agent = db.prepare("SELECT name FROM user_agents WHERE id=? AND user_id=?").get(req.params.id, DEFAULT_USER_ID) as any;
+  if (!agent) return res.status(404).json({ error: "Agent not found" });
+  const dir = workspacePath(agent.name);
+  if (!fs.existsSync(dir)) return res.json({ path: dir, exists: false, files: [] });
+  try {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    const files = entries.map((e) => {
+      const fp = path.join(dir, e.name);
+      let size = 0, mtime = "";
+      try {
+        const s = fs.statSync(fp);
+        size = s.size;
+        mtime = s.mtime.toISOString();
+      } catch {}
+      return { name: e.name, isDir: e.isDirectory(), size, mtime };
+    });
+    // Largest or newest first — feel: "what did the agent just do?"
+    files.sort((a, b) => (b.mtime ?? "").localeCompare(a.mtime ?? ""));
+    res.json({ path: dir, exists: true, files });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/** Read a single file from the agent's workspace (safety: path stays in dir). */
+router.get("/custom/:id/workspace/file", (req, res) => {
+  const agent = db.prepare("SELECT name FROM user_agents WHERE id=? AND user_id=?").get(req.params.id, DEFAULT_USER_ID) as any;
+  if (!agent) return res.status(404).json({ error: "Agent not found" });
+  const requested = String(req.query.path ?? "");
+  if (!requested) return res.status(400).json({ error: "path query param required" });
+
+  const dir = workspacePath(agent.name);
+  const resolved = path.resolve(dir, requested);
+  if (!resolved.startsWith(dir + path.sep) && resolved !== dir) {
+    return res.status(403).json({ error: "path escapes workspace" });
+  }
+  try {
+    const stat = fs.statSync(resolved);
+    if (stat.isDirectory()) return res.status(400).json({ error: "is a directory" });
+    if (stat.size > 100_000) return res.status(413).json({ error: `file too large (${stat.size} bytes; 100KB cap)` });
+    const content = fs.readFileSync(resolved, "utf-8");
+    res.json({ path: requested, size: stat.size, mtime: stat.mtime.toISOString(), content });
+  } catch (err: any) {
+    res.status(404).json({ error: err.message });
+  }
+});
+
+/** Open the agent's workspace in Finder (Anchor-unique — this IS the user's Mac). */
+router.post("/custom/:id/workspace/open", (req, res) => {
+  const agent = db.prepare("SELECT name FROM user_agents WHERE id=? AND user_id=?").get(req.params.id, DEFAULT_USER_ID) as any;
+  if (!agent) return res.status(404).json({ error: "Agent not found" });
+  const dir = workspacePath(agent.name);
+  if (!fs.existsSync(dir)) return res.status(404).json({ error: "Workspace does not exist yet — run the agent once" });
+  try {
+    spawn("open", [dir], { detached: true, stdio: "ignore" }).unref();
+    res.json({ ok: true, path: dir });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/** List this agent's crystallized skills (from P3 skill-extractor). */
+router.get("/custom/:id/skills", (req, res) => {
+  const agent = db.prepare("SELECT id FROM user_agents WHERE id=? AND user_id=?").get(req.params.id, DEFAULT_USER_ID) as any;
+  if (!agent) return res.status(404).json({ error: "Agent not found" });
+  const skills = listSkillsForAgent(agent.id, 20);
+  res.json(skills);
+});
+
+/** Recent runs — grouped by run_id, combining llm_calls + agent_executions + tool calls. */
+router.get("/custom/:id/runs", (req, res) => {
+  const agent = db.prepare("SELECT id, name FROM user_agents WHERE id=? AND user_id=?").get(req.params.id, DEFAULT_USER_ID) as any;
+  if (!agent) return res.status(404).json({ error: "Agent not found" });
+  const limit = Math.min(Math.max(Number(req.query.limit) || 20, 1), 100);
+
+  // Find recent run_ids for this agent
+  const runIds = db.prepare(
+    `SELECT DISTINCT run_id, MAX(created_at) as ts
+       FROM agent_executions
+     WHERE user_id=? AND agent LIKE ? AND run_id IS NOT NULL
+     GROUP BY run_id ORDER BY ts DESC LIMIT ?`
+  ).all(DEFAULT_USER_ID, `Custom: ${agent.name}%`, limit) as any[];
+
+  const out = runIds.map((r) => {
+    const execs = db.prepare(
+      "SELECT agent, action, status, created_at as ts FROM agent_executions WHERE user_id=? AND run_id=? ORDER BY created_at ASC"
+    ).all(DEFAULT_USER_ID, r.run_id) as any[];
+    const llm = db.prepare(
+      "SELECT model_id as model, latency_ms as latency, input_tokens as inTok, output_tokens as outTok, status, created_at as ts FROM llm_calls WHERE run_id=? ORDER BY created_at ASC"
+    ).all(r.run_id) as any[];
+    return {
+      runId: r.run_id,
+      startedAt: execs[0]?.ts ?? r.ts,
+      execs,
+      llm,
+    };
+  });
+  res.json(out);
 });
 
 // Rate custom agent response (Twin learning)

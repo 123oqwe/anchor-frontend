@@ -6,12 +6,13 @@ import { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Bot, Plus, Play, Pause, Trash2, Edit3, Send, Clock,
-  Zap, Loader2, ChevronDown, ChevronRight, X,
+  Zap, Loader2, ChevronDown, ChevronRight, X, Eye,
   MessageSquare, ThumbsUp, ThumbsDown, Sparkles,
   Download, Upload, GitBranch, AlertTriangle, Check, FileText,
 } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
+import { Link } from "wouter";
 
 const TRIGGER_TYPES = [
   { value: "manual", label: "Manual (chat)" },
@@ -355,6 +356,9 @@ export default function Agents() {
                       {a.trigger_type && a.trigger_type !== "manual" && (
                         <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 font-mono">{a.trigger_type}</span>
                       )}
+                      <Link href={`/agents/${a.id}/inspect`}>
+                        <button className="text-muted-foreground/40 hover:text-foreground" title="Inspect — skills, workspace files, runs"><Eye className="h-3 w-3" /></button>
+                      </Link>
                       <button onClick={() => handleExport(a)} className="text-muted-foreground/40 hover:text-foreground" title="Export"><Download className="h-3 w-3" /></button>
                       <button onClick={() => startEdit(a)} className="text-muted-foreground/40 hover:text-foreground" title="Edit"><Edit3 className="h-3 w-3" /></button>
                       <button onClick={async () => { await api.deleteCustomAgent(a.id); loadAll(); toast.success("Deleted"); }} className="text-muted-foreground/40 hover:text-red-400" title="Delete"><Trash2 className="h-3 w-3" /></button>

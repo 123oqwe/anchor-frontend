@@ -166,6 +166,14 @@ export const api = {
   exportCustomAgent: (id: string) => req<any>("GET", `/api/agents/custom/${id}/export`),
   importCustomAgent: (data: any) => req<any>("POST", "/api/agents/custom/import", data),
 
+  // P8 Agent Inspector
+  getAgentWorkspaceFiles: (id: string) => req<{ path: string; exists: boolean; files: { name: string; isDir: boolean; size: number; mtime: string }[] }>("GET", `/api/agents/custom/${id}/workspace/files`),
+  getAgentWorkspaceFile: (id: string, filePath: string) =>
+    req<{ path: string; size: number; mtime: string; content: string }>("GET", `/api/agents/custom/${id}/workspace/file?path=${encodeURIComponent(filePath)}`),
+  openAgentWorkspace: (id: string) => req<{ ok: boolean; path: string }>("POST", `/api/agents/custom/${id}/workspace/open`, {}),
+  getAgentSkills: (id: string) => req<{ name: string; description: string; lang: string; template: string; successCount: number }[]>("GET", `/api/agents/custom/${id}/skills`),
+  getAgentRuns: (id: string, limit = 20) => req<any[]>("GET", `/api/agents/custom/${id}/runs?limit=${limit}`),
+
   // Dev proposals (agent-proposed file writes awaiting human approval)
   getProposals: () => req<any[]>("GET", "/api/agents/proposals"),
   getProposalDetail: (id: string) => req<any>("GET", `/api/agents/proposals/${id}`),
