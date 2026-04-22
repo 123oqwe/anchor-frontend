@@ -64,6 +64,11 @@ import {
   tasksUnifiedToText,
   type TasksUnifiedSummary,
 } from "./tasks-unified.js";
+import {
+  scanEmailUnified,
+  emailUnifiedToText,
+  type EmailUnifiedSummary,
+} from "./email-unified.js";
 
 const HOME = os.homedir();
 
@@ -107,6 +112,9 @@ export interface MacProfile {
 
   // Tasks Unification — Reminders + Things + presence for Linear/Todoist/etc
   tasksUnified?: TasksUnifiedSummary;
+
+  // Email Unification — Apple Mail + Gmail OAuth + presence
+  emailUnified?: EmailUnifiedSummary;
 }
 
 export interface AppInfo {
@@ -264,12 +272,16 @@ function getSystemInfo() {
 
 export async function deepScanMacAsync(): Promise<MacProfile> {
   const profile = deepScanMac();
-  const [messages, notes, tasks] = await Promise.all([
-    scanMessagesUnified(), scanNotesUnified(), scanTasksUnified(),
+  const [messages, notes, tasks, email] = await Promise.all([
+    scanMessagesUnified(),
+    scanNotesUnified(),
+    scanTasksUnified(),
+    scanEmailUnified(),
   ]);
   profile.messagesUnified = messages;
   profile.notesUnified = notes;
   profile.tasksUnified = tasks;
+  profile.emailUnified = email;
   return profile;
 }
 
@@ -375,6 +387,12 @@ export function profileToText(profile: MacProfile): string {
   // ── Tasks Unification — Reminders + Things + presence
   if (profile.tasksUnified) {
     sections.push(tasksUnifiedToText(profile.tasksUnified));
+    sections.push("");
+  }
+
+  // ── Email Unification — Apple Mail + subscriptions + recipient graph
+  if (profile.emailUnified) {
+    sections.push(emailUnifiedToText(profile.emailUnified));
     sections.push("");
   }
 
