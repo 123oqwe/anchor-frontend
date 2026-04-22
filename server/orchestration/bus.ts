@@ -31,7 +31,9 @@ export type AnchorEvent =
   | { type: "APP_FOCUSED"; payload: { app: string; previous: string } }
   | { type: "IDLE_DETECTED"; payload: { idleMinutes: number } }
   // OPT-1 Gap B: dev tool write proposal awaiting user approval
-  | { type: "PROPOSAL_PENDING"; payload: { id: string; kind: string; path?: string; agentName?: string; deltaLines: number } };
+  | { type: "PROPOSAL_PENDING"; payload: { id: string; kind: string; path?: string; agentName?: string; deltaLines: number } }
+  // Portrait streaming: Oracle Council progressive reveal
+  | { type: "PORTRAIT_PROGRESS"; payload: { phase: "profile" | "oracle" | "compass" | "done"; oracle?: string; narrative?: string; questions?: string[]; icon?: string; durationMs?: number; compass?: any } };
 
 class AnchorBus extends EventEmitter {
   publish(data: AnchorEvent) {

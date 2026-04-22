@@ -127,16 +127,33 @@ type InferredProfile = {
 
 // ── Main ─────────────────────────────────────────────────────────────────
 
+/** Load recent confirmed/rejected/partial answers so LLM doesn't repeat mistakes. */
+function loadUserFeedback(): string {
+  try {
+    const rows = db.prepare(
+      `SELECT source, question, answer, note FROM portrait_answers
+       WHERE user_id=? ORDER BY created_at DESC LIMIT 30`
+    ).all(DEFAULT_USER_ID) as any[];
+    if (rows.length === 0) return "";
+    const lines = rows.map((r: any) => {
+      const marker = r.answer === "yes" ? "✓ CONFIRMED" : r.answer === "no" ? "✗ REJECTED" : "~ PARTIAL";
+      return `[${marker}] (${r.source}) ${r.question}${r.note ? ` — user note: ${r.note}` : ""}`;
+    });
+    return "\n\nUSER FEEDBACK FROM PRIOR PORTRAIT (authoritative — do NOT contradict confirmed/rejected facts):\n" + lines.join("\n");
+  } catch { return ""; }
+}
+
 export async function inferProfile(opts?: {
   macProfile?: MacProfile;
   persist?: boolean;   // default true
 }): Promise<InferredProfile> {
   const profile = opts?.macProfile ?? deepScanMac();
   const profileText = profileToText(profile);
+  const feedback = loadUserFeedback();
 
   const userMessage =
     "Here is the scan data. Produce the InferredProfile JSON:\n\n" +
-    profileText;
+    profileText + feedback;
 
   const raw = await text({
     task: "decision",  // prefer a stronger model for structured output

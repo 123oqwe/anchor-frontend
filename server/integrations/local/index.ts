@@ -8,7 +8,6 @@ import { db, DEFAULT_USER_ID, logExecution } from "../../infra/storage/db.js";
 import { nanoid } from "nanoid";
 import { scanBrowserHistory, getAvailableBrowsers } from "./browser-history.js";
 import { scanContacts } from "./contacts.js";
-import { scanCalendar } from "./calendar.js";
 import { scanAllCalendars, unifiedToIngestion } from "./calendar-unified.js";
 import { deepScanMac, profileToText } from "./deep-scan.js";
 import { extractAndSavePeople } from "./people-extractor.js";

@@ -241,7 +241,7 @@ Input schema: ${JSON.stringify(tool.inputSchema)}
 ${prevContext}
 
 RULES:
-- For run_code: write a RETURN expression (e.g. "15000 * 6"), NOT console.log
+- For execute_code: produce a single code block that solves the step; use anchor.* if cross-system calls needed
 - For write_task: if previous results contain useful info, incorporate it into the title
 - For record_outcome: summarize ALL previous results into a meaningful summary
 - Use information from previous results when relevant

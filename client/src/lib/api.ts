@@ -197,6 +197,13 @@ export const api = {
   getMissions: (limit = 30) => req<any[]>("GET", `/api/missions?limit=${limit}`),
   getMission: (id: string) => req<any>("GET", `/api/missions/${id}`),
 
+  // Portrait ceremony (A)
+  startPortrait: () => req<{ started: boolean }>("POST", "/api/onboarding/portrait", {}),
+  getLatestPortrait: () => req<any>("GET", "/api/onboarding/portrait/latest"),
+  savePortraitAnswer: (data: { source: string; question: string; answer: string; note?: string }) =>
+    req<{ ok: boolean }>("POST", "/api/onboarding/portrait/answer", data),
+  getPortraitAnswers: () => req<any[]>("GET", "/api/onboarding/portrait/answers"),
+
   // P12 agentskills.io
   exportAgentSkill: (agentId: string, skillName: string) =>
     req<{ content: string; filename: string }>("GET", `/api/agents/custom/${agentId}/skills/${encodeURIComponent(skillName)}/export`),

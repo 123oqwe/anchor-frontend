@@ -6,7 +6,7 @@
  *
  * Safety:
  *   - Max 10 steps per pipeline
- *   - Max depth 3 for nested call_agent
+ *   - Max depth 3 for nested delegate calls
  *   - 5 minute total runtime budget
  *   - Per-pipeline cost cap ($2 default)
  *   - Single concurrent run per pipeline (lock)

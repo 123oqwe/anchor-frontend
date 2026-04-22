@@ -25,6 +25,7 @@
 import { nanoid } from "nanoid";
 import { db, DEFAULT_USER_ID } from "../infra/storage/db.js";
 import { text } from "../infra/compute/index.js";
+import { bus } from "../orchestration/bus.js";
 import { getLatestProfile, inferProfile, type InferredProfile } from "./profile-inference.js";
 
 // ── Schema ────────────────────────────────────────────────────────────────
@@ -276,14 +277,39 @@ CONSTRAINTS:
 export async function runOracleCouncil(opts?: {
   profile?: InferredProfile;
   persist?: boolean;
+  stream?: boolean;           // emit PORTRAIT_PROGRESS events as oracles resolve
 }): Promise<PortraitV1> {
-  const profile = opts?.profile ?? getLatestProfile() ?? await inferProfile({ persist: true });
+  const stream = opts?.stream !== false;
+  let profile = opts?.profile;
+  if (!profile) {
+    if (stream) bus.publish({ type: "PORTRAIT_PROGRESS", payload: { phase: "profile" } });
+    profile = getLatestProfile() ?? await inferProfile({ persist: true });
+  }
 
   console.log("[OracleCouncil] dispatching 5 Oracles in parallel...");
   const oracleStart = Date.now();
-  const oracles = await Promise.all(ORACLES.map(def => runOracle(def, profile)));
+
+  // Fire events per Oracle as they resolve — each runOracle is a separate Promise.
+  const oracles: OracleNarrative[] = [];
+  await Promise.all(ORACLES.map(async (def) => {
+    const result = await runOracle(def, profile!);
+    oracles.push(result);
+    if (stream) {
+      bus.publish({ type: "PORTRAIT_PROGRESS", payload: {
+        phase: "oracle",
+        oracle: result.oracle,
+        narrative: result.narrative,
+        questions: result.questions,
+        icon: result.icon,
+        durationMs: result.runDurationMs,
+      }});
+    }
+  }));
+  // Restore canonical order (Promise resolution order is non-deterministic)
+  oracles.sort((a, b) => ORACLES.findIndex(o => o.id === a.oracle) - ORACLES.findIndex(o => o.id === b.oracle));
   console.log(`[OracleCouncil] 5 Oracles done in ${Date.now() - oracleStart}ms. Running Compass...`);
 
+  if (stream) bus.publish({ type: "PORTRAIT_PROGRESS", payload: { phase: "compass" } });
   const compassStart = Date.now();
   const compass = await runCompass(profile, oracles);
   console.log(`[OracleCouncil] Compass done in ${Date.now() - compassStart}ms.`);
@@ -294,9 +320,8 @@ export async function runOracleCouncil(opts?: {
     generatedAt: new Date().toISOString(),
   };
 
-  if (opts?.persist !== false) {
-    persistPortrait(portrait);
-  }
+  if (opts?.persist !== false) persistPortrait(portrait);
+  if (stream) bus.publish({ type: "PORTRAIT_PROGRESS", payload: { phase: "done", compass } });
   return portrait;
 }
 
