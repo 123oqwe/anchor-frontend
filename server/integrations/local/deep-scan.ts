@@ -79,6 +79,12 @@ import {
   mediaUnifiedToText,
   type MediaUnifiedSummary,
 } from "./media-unified.js";
+import {
+  scanLocationUnified,
+  locationUnifiedToText,
+  type LocationUnifiedSummary,
+} from "./location-unified.js";
+import { scanAllCalendars } from "./calendar-unified.js";
 
 const HOME = os.homedir();
 
@@ -131,6 +137,9 @@ export interface MacProfile {
 
   // Media Consumption Unification — music + DJ + DAW + streaming
   mediaUnified?: MediaUnifiedSummary;
+
+  // Location / Travel Unification — WiFi history + calendar locations
+  locationUnified?: LocationUnifiedSummary;
 }
 
 export interface AppInfo {
@@ -288,13 +297,14 @@ function getSystemInfo() {
 
 export async function deepScanMacAsync(): Promise<MacProfile> {
   const profile = deepScanMac();
-  const [messages, notes, tasks, email, code, media] = await Promise.all([
+  const [messages, notes, tasks, email, code, media, calendar] = await Promise.all([
     scanMessagesUnified(),
     scanNotesUnified(),
     scanTasksUnified(),
     scanEmailUnified(),
     scanCodeUnified(),
     scanMediaUnified(),
+    scanAllCalendars(30).catch(() => ({ events: [], summary: undefined as any })),
   ]);
   profile.messagesUnified = messages;
   profile.notesUnified = notes;
@@ -302,6 +312,11 @@ export async function deepScanMacAsync(): Promise<MacProfile> {
   profile.emailUnified = email;
   profile.codeUnified = code;
   profile.mediaUnified = media;
+  // Location uses calendar events (when available) and localization's timezone
+  profile.locationUnified = await scanLocationUnified({
+    calendarEvents: calendar.events,
+    systemTimezone: profile.localization?.timezone,
+  });
   return profile;
 }
 
@@ -425,6 +440,12 @@ export function profileToText(profile: MacProfile): string {
   // ── Media Consumption Unification — music taste + DJ/DAW + CN/US split
   if (profile.mediaUnified) {
     sections.push(mediaUnifiedToText(profile.mediaUnified));
+    sections.push("");
+  }
+
+  // ── Location / Travel Unification — WiFi + calendar locations + TZ
+  if (profile.locationUnified) {
+    sections.push(locationUnifiedToText(profile.locationUnified));
     sections.push("");
   }
 
