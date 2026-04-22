@@ -44,6 +44,11 @@ import {
   calendarSummaryToText,
   type CalendarSummary,
 } from "./calendar-unified.js";
+import {
+  scanIMessage,
+  chatSummaryToText,
+  type ChatSummary,
+} from "./imessage-scanner.js";
 
 const HOME = os.homedir();
 
@@ -75,6 +80,9 @@ export interface MacProfile {
 
   // Step 5 — unified calendar summary (optional; populated only if scan ran)
   calendarSummary?: CalendarSummary;
+
+  // Step 6 — iMessage relationship strength (optional; needs FDDA)
+  chatSummary?: ChatSummary;
 }
 
 export interface AppInfo {
@@ -257,6 +265,7 @@ export function deepScanMac(): MacProfile {
 
   const localization = readLocalizationFingerprint();
   const pairSignatures = matchPairSignatures(registryMatched, localization);
+  const chatSummary = scanIMessage(90);
 
   const profile: MacProfile = {
     apps: appInfos,
@@ -272,6 +281,7 @@ export function deepScanMac(): MacProfile {
     unknownApps: unknown,
     localization,
     pairSignatures,
+    chatSummary,
   };
 
   const knownCount = appInfos.filter(a => a.known).length;
@@ -306,6 +316,12 @@ export function profileToText(profile: MacProfile): string {
   // ── Step 5: Calendar summary — rhythm + schedule signals
   if (profile.calendarSummary) {
     sections.push(calendarSummaryToText(profile.calendarSummary));
+    sections.push("");
+  }
+
+  // ── Step 6: iMessage relationship strength — who actually matters
+  if (profile.chatSummary) {
+    sections.push(chatSummaryToText(profile.chatSummary));
     sections.push("");
   }
 
