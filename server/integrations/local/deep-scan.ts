@@ -30,6 +30,11 @@ import {
   type AppProfile,
   type AppRegion,
 } from "./app-registry.js";
+import {
+  readLocalizationFingerprint,
+  localizationToText,
+  type LocalizationFingerprint,
+} from "./localization-fingerprint.js";
 
 const HOME = os.homedir();
 
@@ -52,6 +57,9 @@ export interface MacProfile {
     permissionsNeeded: { app: string; permission: string }[];
   };
   unknownApps: string[];
+
+  // Step 3 — 0-permission OS-level signals
+  localization: LocalizationFingerprint;
 }
 
 export interface AppInfo {
@@ -244,6 +252,7 @@ export function deepScanMac(): MacProfile {
     topSignals,
     scanCapabilities,
     unknownApps: unknown,
+    localization: readLocalizationFingerprint(),
   };
 
   const knownCount = appInfos.filter(a => a.known).length;
@@ -260,6 +269,13 @@ export function deepScanMac(): MacProfile {
 
 export function profileToText(profile: MacProfile): string {
   const sections: string[] = [];
+
+  // ── Step 3: Localization fingerprint first — 0-permission OS-level signals
+  // provide the strongest single-shot cultural anchor, so LLM sees it up front.
+  if (profile.localization) {
+    sections.push(localizationToText(profile.localization));
+    sections.push("");
+  }
 
   // ── Region affinity — new in Step 2, first because it's the most important framing ──
   if (profile.regionAffinity.length > 0) {
