@@ -667,6 +667,18 @@ try { db.exec(`
   )
 `); } catch {}
 
+// App Registry: unknown apps queued for batch LLM classification
+try { db.exec(`
+  CREATE TABLE IF NOT EXISTS unknown_apps (
+    name TEXT PRIMARY KEY,
+    first_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+    seen_count INTEGER NOT NULL DEFAULT 1,
+    classified_at TEXT,
+    classification_json TEXT
+  )
+`); } catch {}
+
 // P7 Hooks: user-registered shell / agent callbacks on Anchor events.
 try { db.exec(`
   CREATE TABLE IF NOT EXISTS user_hooks (

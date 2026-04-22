@@ -1,20 +1,35 @@
 /**
  * Deep Mac Scanner — discovers EVERYTHING about the user's machine.
  *
- * Unlike browser-history.ts (only URLs), this scans:
- * 1. Installed applications → infer interests, tools, work style
- * 2. Git repositories → infer projects, tech stack, activity
- * 3. Desktop/Documents files → infer current focus, academic work
- * 4. Running processes → infer current activity
- * 5. Homebrew packages → infer technical depth
- * 6. System info → device, storage, environment
+ * Step 2 of the scanning redesign: the hardcoded APP_CATEGORIES dict is gone.
+ * Every installed app is now looked up against server/integrations/local/
+ * app-registry.ts which carries 180+ curated entries with category, regions,
+ * signals, and scan strategy. Output is no longer a flat "apps: string[]"
+ * but a rich profile with region affinity, aggregated signals, and a
+ * scan-capability assessment. Unknown apps get queued into unknown_apps
+ * table for future batch LLM classification.
  *
- * All data stays local. Only metadata (app names, file names) — never file contents.
+ * What this scanner touches (all metadata, never contents):
+ * 1. /Applications          → registry match → category+region+signal
+ * 2. Git repos              → project + language inference
+ * 3. Desktop / Documents    → filenames only
+ * 4. Running processes      → current focus
+ * 5. Homebrew packages      → technical depth
+ * 6. System info            → device + env
  */
 import { execSync } from "child_process";
 import fs from "fs";
 import path from "path";
 import os from "os";
+import { db, DEFAULT_USER_ID } from "../../infra/storage/db.js";
+import {
+  classifyInstalledApps,
+  aggregateSignals,
+  inferRegionAffinity,
+  scanCapabilityReport,
+  type AppProfile,
+  type AppRegion,
+} from "./app-registry.js";
 
 const HOME = os.homedir();
 
@@ -26,11 +41,27 @@ export interface MacProfile {
   brewPackages: string[];
   runningApps: string[];
   systemInfo: { hostname: string; user: string; shell: string; cores: number; memGB: number };
+
+  // Registry-derived insights (Step 2)
+  regionAffinity: { region: AppRegion; score: number; apps: string[] }[];
+  topSignals: { signal: string; score: number; sources: string[] }[];
+  scanCapabilities: {
+    readableContent: { name: string; method: string }[];
+    accessibilityOnly: string[];
+    presenceOnly: string[];
+    permissionsNeeded: { app: string; permission: string }[];
+  };
+  unknownApps: string[];
 }
 
 export interface AppInfo {
   name: string;
-  category: string; // coding, design, music, finance, social, productivity, entertainment, other
+  category: string;
+  known: boolean;
+  regions?: AppRegion[];
+  signals?: string[];        // flattened to name list (strength preserved in signal name via suffix)
+  scanMethod?: string;       // sqlite-direct / applescript / accessibility-only / presence-only / fs-config / api-oauth
+  launchedYear?: number;
 }
 
 export interface ProjectInfo {
@@ -47,58 +78,51 @@ export interface FileInfo {
   modified: string;
 }
 
-// ── App categorization ──────────────────────────────────────────────────────
+// ── App scan: registry-driven ───────────────────────────────────────────────
 
-const APP_CATEGORIES: Record<string, string> = {
-  // Coding
-  "Cursor": "coding", "Visual Studio Code": "coding", "Xcode": "coding", "IntelliJ": "coding",
-  "Codex": "coding", "TRAE SOLO": "coding", "GitHub Desktop": "coding", "Terminal": "coding",
-  "iTerm": "coding", "Warp": "coding", "Docker": "coding",
-  // AI
-  "Claude": "ai", "ChatGPT": "ai", "ChatGPT Atlas": "ai", "Ollama": "ai", "Manus": "ai",
-  // Design
-  "Figma": "design", "Sketch": "design", "Canva": "design", "Adobe Photoshop": "design",
-  // Music
-  "rekordbox 7": "music", "Serato DJ Pro": "music", "Serato DJ Lite": "music",
-  "djay Pro": "music", "Splice": "music", "GarageBand": "music", "Logic Pro": "music",
-  "Ableton": "music",
-  // Social
-  "WeChat": "social", "Telegram": "social", "Slack": "social", "Discord": "social",
-  "WhatsApp": "social", "Zoom": "social", "Microsoft Teams": "social",
-  // Finance
-  "Numbers": "finance", "Excel": "finance",
-  // Productivity
-  "Notion": "productivity", "Obsidian": "productivity", "Grammarly Desktop": "productivity",
-  "Granola": "productivity", "Pages": "productivity", "Keynote": "productivity",
-  // Browser
-  "Google Chrome": "browser", "Safari": "browser", "Firefox": "browser",
-  "Arc": "browser", "Tor Browser": "browser",
-  // Entertainment
-  "GGPoker": "entertainment", "Steam": "entertainment", "NeteaseMusic": "entertainment",
-  "Spotify": "entertainment",
-  // Media
-  "iMovie": "media", "Final Cut Pro": "media", "DaVinci Resolve": "media",
-};
-
-function categorizeApp(name: string): string {
-  // Clean .app suffix
-  const clean = name.replace(/\.app$/, "").trim();
-  return APP_CATEGORIES[clean] ?? "other";
+/** Log an unknown app for later LLM classification (upsert with seen_count++). */
+function recordUnknownApp(name: string): void {
+  try {
+    db.prepare(
+      `INSERT INTO unknown_apps (name, first_seen_at, last_seen_at, seen_count)
+       VALUES (?, datetime('now'), datetime('now'), 1)
+       ON CONFLICT(name) DO UPDATE SET
+         last_seen_at = datetime('now'),
+         seen_count   = unknown_apps.seen_count + 1`
+    ).run(name);
+  } catch {}
 }
 
-// ── Scan functions ──────────────────────────────────────────────────────────
+function toAppInfo(app: AppProfile, source: string): AppInfo {
+  return {
+    name: source.replace(/\.app$/i, ""),
+    category: app.category,
+    known: true,
+    regions: app.regions,
+    signals: app.signals.map(s => `${s.name}:${s.strength}`),
+    scanMethod: app.scanStrategy.method,
+    launchedYear: app.launchedYear,
+  };
+}
 
-function scanApps(): AppInfo[] {
+function scanApps(): { matched: AppInfo[]; unknown: string[] } {
   try {
-    const apps = fs.readdirSync("/Applications")
-      .filter(f => f.endsWith(".app"))
-      .map(f => {
-        const name = f.replace(/\.app$/, "");
-        return { name, category: categorizeApp(f) };
-      })
-      .filter(a => a.category !== "other"); // Only keep categorizable apps
-    return apps;
-  } catch { return []; }
+    const filenames = fs.readdirSync("/Applications").filter(f => f.endsWith(".app"));
+    const { matched, unknown } = classifyInstalledApps(filenames);
+
+    // Log unknowns for later batch LLM classification
+    for (const u of unknown) recordUnknownApp(u);
+
+    const apps: AppInfo[] = matched.map(m => toAppInfo(m.app, m.source));
+    // Unknowns still surface in the list with known=false so downstream can see them
+    for (const u of unknown) {
+      apps.push({ name: u, category: "other", known: false });
+    }
+
+    return { matched: apps, unknown };
+  } catch {
+    return { matched: [], unknown: [] };
+  }
 }
 
 function scanGitProjects(): ProjectInfo[] {
@@ -186,17 +210,48 @@ function getSystemInfo() {
 export function deepScanMac(): MacProfile {
   console.log("[DeepScan] Starting full Mac profile scan...");
 
+  const { matched: appInfos, unknown } = scanApps();
+
+  // Re-derive AppProfile objects from AppInfo so we can feed registry helpers
+  // that expect the full profile shape. (classifyInstalledApps was already run
+  // inside scanApps; we reconstruct the shape here for aggregate helpers.)
+  const filenames = (() => {
+    try { return fs.readdirSync("/Applications").filter(f => f.endsWith(".app")); }
+    catch { return []; }
+  })();
+  const { matched: registryMatched } = classifyInstalledApps(filenames);
+
+  const regionAffinity = inferRegionAffinity(registryMatched);
+  const topSignals = aggregateSignals(registryMatched).slice(0, 20);
+  const capReport = scanCapabilityReport(registryMatched);
+
+  const scanCapabilities = {
+    readableContent: capReport.readableContent.map(a => ({ name: a.name, method: a.scanStrategy.method })),
+    accessibilityOnly: capReport.accessibilityOnly.map(a => a.name),
+    presenceOnly: capReport.presenceOnly.map(a => a.name),
+    permissionsNeeded: capReport.needsPermission.map(p => ({ app: p.app.name, permission: p.permission })),
+  };
+
   const profile: MacProfile = {
-    apps: scanApps(),
+    apps: appInfos,
     gitProjects: scanGitProjects(),
     desktopFiles: scanDesktopFiles(),
     documentFiles: scanDocuments(),
     brewPackages: scanBrew(),
     runningApps: scanRunningApps(),
     systemInfo: getSystemInfo(),
+    regionAffinity,
+    topSignals,
+    scanCapabilities,
+    unknownApps: unknown,
   };
 
-  console.log(`[DeepScan] Found: ${profile.apps.length} apps, ${profile.gitProjects.length} git projects, ${profile.desktopFiles.length} desktop files, ${profile.brewPackages.length} brew packages`);
+  const knownCount = appInfos.filter(a => a.known).length;
+  console.log(`[DeepScan] Apps: ${knownCount}/${appInfos.length} known. Git: ${profile.gitProjects.length}. Desktop: ${profile.desktopFiles.length}. Brew: ${profile.brewPackages.length}. Unknown queued: ${unknown.length}.`);
+  if (regionAffinity.length > 0) {
+    const top = regionAffinity.slice(0, 2).map(r => `${r.region}(${r.score})`).join(" / ");
+    console.log(`[DeepScan] Region affinity: ${top}`);
+  }
 
   return profile;
 }
@@ -206,26 +261,63 @@ export function deepScanMac(): MacProfile {
 export function profileToText(profile: MacProfile): string {
   const sections: string[] = [];
 
-  // Infer INTERESTS and ACTIVITIES from apps — not the apps themselves
-  const appsByCategory = new Map<string, string[]>();
-  for (const app of profile.apps) {
-    if (!appsByCategory.has(app.category)) appsByCategory.set(app.category, []);
-    appsByCategory.get(app.category)!.push(app.name);
+  // ── Region affinity — new in Step 2, first because it's the most important framing ──
+  if (profile.regionAffinity.length > 0) {
+    sections.push("CULTURAL/REGIONAL AFFINITY (inferred from app portfolio):");
+    const top = profile.regionAffinity.slice(0, 3);
+    for (const r of top) {
+      sections.push(`  ${r.region}: score ${r.score} (apps: ${r.apps.slice(0, 5).join(", ")}${r.apps.length > 5 ? ", ..." : ""})`);
+    }
+    if (top.length >= 2 && Math.abs(top[0].score - top[1].score) / top[0].score < 0.2) {
+      sections.push(`  → This user is BI-CULTURAL (${top[0].region} and ${top[1].region} scores are within 20%)`);
+    } else if (top.length >= 1) {
+      sections.push(`  → Primary cultural context: ${top[0].region}`);
+    }
   }
-  if (appsByCategory.size > 0) {
-    sections.push("USER INTERESTS AND ACTIVITIES (inferred from installed apps):");
-    if (appsByCategory.has("music")) sections.push("  This person is actively involved in DJ/music production");
-    if (appsByCategory.has("coding") && (appsByCategory.get("coding")?.length ?? 0) >= 3) sections.push("  This person is a serious developer/programmer");
-    if (appsByCategory.has("ai") && (appsByCategory.get("ai")?.length ?? 0) >= 2) sections.push("  This person works heavily with AI tools");
-    if (appsByCategory.has("social")) sections.push(`  Social apps: ${appsByCategory.get("social")!.join(", ")} — extract any people if possible`);
-    if (appsByCategory.has("finance")) sections.push("  Has finance/spreadsheet tools installed");
-    if (appsByCategory.has("entertainment")) sections.push(`  Entertainment: ${appsByCategory.get("entertainment")!.join(", ")}`);
-    sections.push("  NOTE: Do NOT create nodes for the apps themselves. Only create nodes for goals, projects, people, and patterns.");
+
+  // ── Top aggregated behavioral signals — weighted by app strength sum ──
+  if (profile.topSignals.length > 0) {
+    sections.push("\nBEHAVIORAL SIGNALS (aggregated across all matched apps, highest-first):");
+    for (const s of profile.topSignals.slice(0, 12)) {
+      sections.push(`  [${String(s.score).padStart(3)}] ${s.signal} — evidence: ${s.sources.slice(0, 4).join(", ")}${s.sources.length > 4 ? "..." : ""}`);
+    }
+  }
+
+  // ── Apps grouped by category for LLM context (not for node creation) ──
+  const knownApps = profile.apps.filter(a => a.known);
+  if (knownApps.length > 0) {
+    const byCategoryPrefix = new Map<string, { name: string; regions: string }[]>();
+    for (const a of knownApps) {
+      const prefix = (a.category ?? "other").split("-")[0];
+      if (!byCategoryPrefix.has(prefix)) byCategoryPrefix.set(prefix, []);
+      byCategoryPrefix.get(prefix)!.push({
+        name: a.name,
+        regions: (a.regions ?? []).filter(r => r !== "GLOBAL").join(",") || "",
+      });
+    }
+    sections.push("\nINSTALLED APPS BY CATEGORY (context only — do NOT create app nodes):");
+    const ordered = Array.from(byCategoryPrefix.entries()).sort((a, b) => b[1].length - a[1].length);
+    for (const [prefix, apps] of ordered) {
+      const rendered = apps.map(a => a.regions ? `${a.name}(${a.regions})` : a.name).join(", ");
+      sections.push(`  ${prefix.toUpperCase()}: ${rendered}`);
+    }
+  }
+
+  // ── Scan capability — tells the extractor what data depth is realistic ──
+  const cap = profile.scanCapabilities;
+  if (cap.readableContent.length > 0 || cap.permissionsNeeded.length > 0) {
+    sections.push("\nDATA ACCESS AVAILABLE:");
+    if (cap.readableContent.length > 0) {
+      sections.push(`  Full content readable: ${cap.readableContent.map(a => `${a.name} (${a.method})`).join(", ")}`);
+    }
+    if (cap.permissionsNeeded.length > 0) {
+      sections.push(`  Permissions needed for deeper access: ${cap.permissionsNeeded.map(p => `${p.app}→${p.permission}`).join(", ")}`);
+    }
   }
 
   // Git projects
   if (profile.gitProjects.length > 0) {
-    sections.push("\nACTIVE PROJECTS:");
+    sections.push("\nACTIVE PROJECTS (git repos):");
     for (const p of profile.gitProjects) {
       sections.push(`  ${p.name} (${p.languages.join(", ") || "unknown"})${p.lastModified ? ` — last modified ${p.lastModified.slice(0, 10)}` : ""}`);
     }
@@ -236,18 +328,14 @@ export function profileToText(profile: MacProfile): string {
     const meaningful = profile.desktopFiles.filter(f => f.ext && f.ext !== "");
     if (meaningful.length > 0) {
       sections.push("\nDESKTOP FILES:");
-      for (const f of meaningful) {
-        sections.push(`  ${f.name}`);
-      }
+      for (const f of meaningful) sections.push(`  ${f.name}`);
     }
   }
 
   // Documents
   if (profile.documentFiles.length > 0) {
     sections.push("\nDOCUMENTS:");
-    for (const f of profile.documentFiles) {
-      sections.push(`  ${f.name}`);
-    }
+    for (const f of profile.documentFiles) sections.push(`  ${f.name}`);
   }
 
   // Tech stack from brew
@@ -255,9 +343,7 @@ export function profileToText(profile: MacProfile): string {
     const notable = profile.brewPackages.filter(p =>
       ["python", "node", "go", "rust", "postgresql", "redis", "docker", "git", "ffmpeg", "ollama", "flyctl"].some(k => p.includes(k))
     );
-    if (notable.length > 0) {
-      sections.push(`\nTECH STACK: ${notable.join(", ")}`);
-    }
+    if (notable.length > 0) sections.push(`\nTECH STACK: ${notable.join(", ")}`);
   }
 
   // Running now
@@ -267,6 +353,13 @@ export function profileToText(profile: MacProfile): string {
 
   // System
   sections.push(`\nSYSTEM: ${profile.systemInfo.hostname}, ${profile.systemInfo.cores} cores, ${profile.systemInfo.memGB}GB RAM`);
+
+  // Extractor guidance — unchanged message from Step 1 but kept at end
+  sections.push(
+    "\nNOTE for extractor: Do NOT create nodes for apps themselves. Use the CULTURAL AFFINITY, " +
+    "BEHAVIORAL SIGNALS, and ACTIVE PROJECTS sections to infer user's identity facets, " +
+    "goals, tensions, and patterns. The app list is context, not the subject."
+  );
 
   return sections.join("\n");
 }
