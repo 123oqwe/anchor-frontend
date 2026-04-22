@@ -54,6 +54,11 @@ import {
   messagesUnifiedToText,
   type MessagesUnifiedSummary,
 } from "./messages-unified.js";
+import {
+  scanNotesUnified,
+  notesUnifiedToText,
+  type NotesUnifiedSummary,
+} from "./notes-unified.js";
 
 const HOME = os.homedir();
 
@@ -91,6 +96,9 @@ export interface MacProfile {
 
   // Messages Unification — iMessage + Telegram/Slack/WeChat activity fusion
   messagesUnified?: MessagesUnifiedSummary;
+
+  // Notes Unification — Obsidian + Apple Notes + Bear + scattered markdown
+  notesUnified?: NotesUnifiedSummary;
 }
 
 export interface AppInfo {
@@ -248,7 +256,9 @@ function getSystemInfo() {
 
 export async function deepScanMacAsync(): Promise<MacProfile> {
   const profile = deepScanMac();
-  profile.messagesUnified = await scanMessagesUnified();
+  const [messages, notes] = await Promise.all([scanMessagesUnified(), scanNotesUnified()]);
+  profile.messagesUnified = messages;
+  profile.notesUnified = notes;
   return profile;
 }
 
@@ -342,6 +352,12 @@ export function profileToText(profile: MacProfile): string {
   // ── Messages Unification — cross-app chat view
   if (profile.messagesUnified) {
     sections.push(messagesUnifiedToText(profile.messagesUnified));
+    sections.push("");
+  }
+
+  // ── Notes Unification — formal PKM apps + scattered markdown pattern
+  if (profile.notesUnified) {
+    sections.push(notesUnifiedToText(profile.notesUnified));
     sections.push("");
   }
 
