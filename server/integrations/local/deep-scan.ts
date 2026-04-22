@@ -74,6 +74,11 @@ import {
   codeUnifiedToText,
   type CodeUnifiedSummary,
 } from "./code-unified.js";
+import {
+  scanMediaUnified,
+  mediaUnifiedToText,
+  type MediaUnifiedSummary,
+} from "./media-unified.js";
 
 const HOME = os.homedir();
 
@@ -123,6 +128,9 @@ export interface MacProfile {
 
   // Code Activity Unification — local git velocity + commit themes
   codeUnified?: CodeUnifiedSummary;
+
+  // Media Consumption Unification — music + DJ + DAW + streaming
+  mediaUnified?: MediaUnifiedSummary;
 }
 
 export interface AppInfo {
@@ -280,18 +288,20 @@ function getSystemInfo() {
 
 export async function deepScanMacAsync(): Promise<MacProfile> {
   const profile = deepScanMac();
-  const [messages, notes, tasks, email, code] = await Promise.all([
+  const [messages, notes, tasks, email, code, media] = await Promise.all([
     scanMessagesUnified(),
     scanNotesUnified(),
     scanTasksUnified(),
     scanEmailUnified(),
     scanCodeUnified(),
+    scanMediaUnified(),
   ]);
   profile.messagesUnified = messages;
   profile.notesUnified = notes;
   profile.tasksUnified = tasks;
   profile.emailUnified = email;
   profile.codeUnified = code;
+  profile.mediaUnified = media;
   return profile;
 }
 
@@ -409,6 +419,12 @@ export function profileToText(profile: MacProfile): string {
   // ── Code Activity Unification — git velocity + themes + rhythm
   if (profile.codeUnified) {
     sections.push(codeUnifiedToText(profile.codeUnified));
+    sections.push("");
+  }
+
+  // ── Media Consumption Unification — music taste + DJ/DAW + CN/US split
+  if (profile.mediaUnified) {
+    sections.push(mediaUnifiedToText(profile.mediaUnified));
     sections.push("");
   }
 
