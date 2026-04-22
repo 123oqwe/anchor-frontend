@@ -49,6 +49,11 @@ import {
   chatSummaryToText,
   type ChatSummary,
 } from "./imessage-scanner.js";
+import {
+  scanMessagesUnified,
+  messagesUnifiedToText,
+  type MessagesUnifiedSummary,
+} from "./messages-unified.js";
 
 const HOME = os.homedir();
 
@@ -83,6 +88,9 @@ export interface MacProfile {
 
   // Step 6 — iMessage relationship strength (optional; needs FDDA)
   chatSummary?: ChatSummary;
+
+  // Messages Unification — iMessage + Telegram/Slack/WeChat activity fusion
+  messagesUnified?: MessagesUnifiedSummary;
 }
 
 export interface AppInfo {
@@ -238,6 +246,12 @@ function getSystemInfo() {
 
 // ── Master: collect everything ──────────────────────────────────────────────
 
+export async function deepScanMacAsync(): Promise<MacProfile> {
+  const profile = deepScanMac();
+  profile.messagesUnified = await scanMessagesUnified();
+  return profile;
+}
+
 export function deepScanMac(): MacProfile {
   console.log("[DeepScan] Starting full Mac profile scan...");
 
@@ -322,6 +336,12 @@ export function profileToText(profile: MacProfile): string {
   // ── Step 6: iMessage relationship strength — who actually matters
   if (profile.chatSummary) {
     sections.push(chatSummaryToText(profile.chatSummary));
+    sections.push("");
+  }
+
+  // ── Messages Unification — cross-app chat view
+  if (profile.messagesUnified) {
+    sections.push(messagesUnifiedToText(profile.messagesUnified));
     sections.push("");
   }
 
