@@ -35,6 +35,11 @@ import {
   localizationToText,
   type LocalizationFingerprint,
 } from "./localization-fingerprint.js";
+import {
+  matchPairSignatures,
+  signaturesToText,
+  type MatchedSignature,
+} from "./app-pair-signatures.js";
 
 const HOME = os.homedir();
 
@@ -60,6 +65,9 @@ export interface MacProfile {
 
   // Step 3 — 0-permission OS-level signals
   localization: LocalizationFingerprint;
+
+  // Step 4 — higher-order app pair/combination signatures
+  pairSignatures: MatchedSignature[];
 }
 
 export interface AppInfo {
@@ -240,6 +248,9 @@ export function deepScanMac(): MacProfile {
     permissionsNeeded: capReport.needsPermission.map(p => ({ app: p.app.name, permission: p.permission })),
   };
 
+  const localization = readLocalizationFingerprint();
+  const pairSignatures = matchPairSignatures(registryMatched, localization);
+
   const profile: MacProfile = {
     apps: appInfos,
     gitProjects: scanGitProjects(),
@@ -252,7 +263,8 @@ export function deepScanMac(): MacProfile {
     topSignals,
     scanCapabilities,
     unknownApps: unknown,
-    localization: readLocalizationFingerprint(),
+    localization,
+    pairSignatures,
   };
 
   const knownCount = appInfos.filter(a => a.known).length;
@@ -274,6 +286,13 @@ export function profileToText(profile: MacProfile): string {
   // provide the strongest single-shot cultural anchor, so LLM sees it up front.
   if (profile.localization) {
     sections.push(localizationToText(profile.localization));
+    sections.push("");
+  }
+
+  // ── Step 4: Higher-order pair signatures — this is the LLM's single best
+  // input because each signature is already a curated reframe of a combo.
+  if (profile.pairSignatures && profile.pairSignatures.length > 0) {
+    sections.push(signaturesToText(profile.pairSignatures));
     sections.push("");
   }
 
