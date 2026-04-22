@@ -114,3 +114,6 @@ client/public/__manus__/version.json
 # SQLite WAL temp files
 *.db-shm
 *.db-wal
+
+# Wrangler local state (created by any wrangler dev invocation at repo root)
+.wrangler/
