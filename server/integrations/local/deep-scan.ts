@@ -69,6 +69,11 @@ import {
   emailUnifiedToText,
   type EmailUnifiedSummary,
 } from "./email-unified.js";
+import {
+  scanCodeUnified,
+  codeUnifiedToText,
+  type CodeUnifiedSummary,
+} from "./code-unified.js";
 
 const HOME = os.homedir();
 
@@ -115,6 +120,9 @@ export interface MacProfile {
 
   // Email Unification — Apple Mail + Gmail OAuth + presence
   emailUnified?: EmailUnifiedSummary;
+
+  // Code Activity Unification — local git velocity + commit themes
+  codeUnified?: CodeUnifiedSummary;
 }
 
 export interface AppInfo {
@@ -272,16 +280,18 @@ function getSystemInfo() {
 
 export async function deepScanMacAsync(): Promise<MacProfile> {
   const profile = deepScanMac();
-  const [messages, notes, tasks, email] = await Promise.all([
+  const [messages, notes, tasks, email, code] = await Promise.all([
     scanMessagesUnified(),
     scanNotesUnified(),
     scanTasksUnified(),
     scanEmailUnified(),
+    scanCodeUnified(),
   ]);
   profile.messagesUnified = messages;
   profile.notesUnified = notes;
   profile.tasksUnified = tasks;
   profile.emailUnified = email;
+  profile.codeUnified = code;
   return profile;
 }
 
@@ -393,6 +403,12 @@ export function profileToText(profile: MacProfile): string {
   // ── Email Unification — Apple Mail + subscriptions + recipient graph
   if (profile.emailUnified) {
     sections.push(emailUnifiedToText(profile.emailUnified));
+    sections.push("");
+  }
+
+  // ── Code Activity Unification — git velocity + themes + rhythm
+  if (profile.codeUnified) {
+    sections.push(codeUnifiedToText(profile.codeUnified));
     sections.push("");
   }
 
