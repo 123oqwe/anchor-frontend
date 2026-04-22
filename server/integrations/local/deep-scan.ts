@@ -40,6 +40,10 @@ import {
   signaturesToText,
   type MatchedSignature,
 } from "./app-pair-signatures.js";
+import {
+  calendarSummaryToText,
+  type CalendarSummary,
+} from "./calendar-unified.js";
 
 const HOME = os.homedir();
 
@@ -68,6 +72,9 @@ export interface MacProfile {
 
   // Step 4 — higher-order app pair/combination signatures
   pairSignatures: MatchedSignature[];
+
+  // Step 5 — unified calendar summary (optional; populated only if scan ran)
+  calendarSummary?: CalendarSummary;
 }
 
 export interface AppInfo {
@@ -293,6 +300,12 @@ export function profileToText(profile: MacProfile): string {
   // input because each signature is already a curated reframe of a combo.
   if (profile.pairSignatures && profile.pairSignatures.length > 0) {
     sections.push(signaturesToText(profile.pairSignatures));
+    sections.push("");
+  }
+
+  // ── Step 5: Calendar summary — rhythm + schedule signals
+  if (profile.calendarSummary) {
+    sections.push(calendarSummaryToText(profile.calendarSummary));
     sections.push("");
   }
 

@@ -9,6 +9,7 @@ import { nanoid } from "nanoid";
 import { scanBrowserHistory, getAvailableBrowsers } from "./browser-history.js";
 import { scanContacts } from "./contacts.js";
 import { scanCalendar } from "./calendar.js";
+import { scanAllCalendars, unifiedToIngestion } from "./calendar-unified.js";
 import { deepScanMac, profileToText } from "./deep-scan.js";
 import { extractAndSavePeople } from "./people-extractor.js";
 import { extractFromText } from "../../cognition/extractor.js";
@@ -90,9 +91,23 @@ export async function runLocalScan(opts?: {
 
   try {
     // ── Step 0: Deep Mac scan — apps, projects, files, tech stack ──
-    // This runs FIRST because it's instant (no LLM) and gives rich context
+    // This runs FIRST because it's instant (no LLM) and gives rich context.
+    // Step 5 addition: run calendar unification in parallel and merge its
+    // summary into the macProfile so the extractor sees schedule info too.
     bus.publish({ type: "SCAN_PROGRESS", payload: { phase: "deep_scan", status: "running", found: 0 } });
-    const macProfile = deepScanMac();
+    const [macProfile, calUnified] = await Promise.all([
+      Promise.resolve(deepScanMac()),
+      calendar ? scanAllCalendars(sinceDaysAgo).catch(err => {
+        console.error("[CalendarUnified] error:", err?.message);
+        return null;
+      }) : Promise.resolve(null),
+    ]);
+    if (calUnified) {
+      macProfile.calendarSummary = calUnified.summary;
+      // Feed unified events into the same pipeline the extractor expects
+      calendarEvents = unifiedToIngestion(calUnified.events);
+      bus.publish({ type: "SCAN_PROGRESS", payload: { phase: "calendar", status: "done", found: calendarEvents.length } });
+    }
     const profileText = profileToText(macProfile);
     if (profileText.length > 50) {
       console.log("[LocalScan] Deep scan: extracting from Mac profile...");
@@ -135,9 +150,8 @@ export async function runLocalScan(opts?: {
     if (contacts) contactEvents = scanContacts();
     bus.publish({ type: "SCAN_PROGRESS", payload: { phase: "contacts", status: "done", found: contactEvents.length } });
 
-    bus.publish({ type: "SCAN_PROGRESS", payload: { phase: "calendar", status: "running", found: 0 } });
-    if (calendar) calendarEvents = scanCalendar(sinceDaysAgo);
-    bus.publish({ type: "SCAN_PROGRESS", payload: { phase: "calendar", status: "done", found: calendarEvents.length } });
+    // (calendar events already collected via scanAllCalendars above — skipping
+    // redundant scanCalendar() call that was here pre-Step-5)
 
     const allEvents = [...browserEvents, ...contactEvents, ...calendarEvents];
     const totalFetched = allEvents.length;
