@@ -59,6 +59,11 @@ import {
   notesUnifiedToText,
   type NotesUnifiedSummary,
 } from "./notes-unified.js";
+import {
+  scanTasksUnified,
+  tasksUnifiedToText,
+  type TasksUnifiedSummary,
+} from "./tasks-unified.js";
 
 const HOME = os.homedir();
 
@@ -99,6 +104,9 @@ export interface MacProfile {
 
   // Notes Unification — Obsidian + Apple Notes + Bear + scattered markdown
   notesUnified?: NotesUnifiedSummary;
+
+  // Tasks Unification — Reminders + Things + presence for Linear/Todoist/etc
+  tasksUnified?: TasksUnifiedSummary;
 }
 
 export interface AppInfo {
@@ -256,9 +264,12 @@ function getSystemInfo() {
 
 export async function deepScanMacAsync(): Promise<MacProfile> {
   const profile = deepScanMac();
-  const [messages, notes] = await Promise.all([scanMessagesUnified(), scanNotesUnified()]);
+  const [messages, notes, tasks] = await Promise.all([
+    scanMessagesUnified(), scanNotesUnified(), scanTasksUnified(),
+  ]);
   profile.messagesUnified = messages;
   profile.notesUnified = notes;
+  profile.tasksUnified = tasks;
   return profile;
 }
 
@@ -358,6 +369,12 @@ export function profileToText(profile: MacProfile): string {
   // ── Notes Unification — formal PKM apps + scattered markdown pattern
   if (profile.notesUnified) {
     sections.push(notesUnifiedToText(profile.notesUnified));
+    sections.push("");
+  }
+
+  // ── Tasks Unification — Reminders + Things + presence
+  if (profile.tasksUnified) {
+    sections.push(tasksUnifiedToText(profile.tasksUnified));
     sections.push("");
   }
 
