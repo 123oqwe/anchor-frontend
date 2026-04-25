@@ -13,16 +13,22 @@ import {
   ChevronRight,
   Command,
   Anchor,
+  Sparkles,
+  ShieldCheck,
+  Workflow,
 } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 
 const navItems = [
   { path: "/dashboard", label: "Dashboard", icon: LayoutDashboard, description: "Human Graph & State" },
+  { path: "/scan", label: "Scan", icon: Sparkles, description: "Read your Mac, step by step" },
   { path: "/advisor", label: "Advisor", icon: MessageCircle, description: "Decision Conversations" },
   { path: "/twin", label: "Twin Agent", icon: Users, description: "Your Digital Twin" },
   { path: "/agents", label: "Agents", icon: Bot, description: "Custom Agents & Automations" },
   { path: "/memory", label: "Memory", icon: Brain, description: "Knowledge & Records" },
   { path: "/workspace", label: "Workspace", icon: FolderKanban, description: "Projects & Tasks" },
+  { path: "/sessions", label: "Sessions", icon: Workflow, description: "Plan execution sessions" },
+  { path: "/approvals", label: "Approvals", icon: ShieldCheck, description: "Pending decisions" },
   { path: "/settings", label: "Settings", icon: Settings, description: "Preferences" },
 ];
 

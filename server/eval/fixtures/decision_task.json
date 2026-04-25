@@ -1,0 +1,36 @@
+[
+  {
+    "id": "decision_simple_arithmetic",
+    "description": "Simple arithmetic — the answer should contain the number 42",
+    "category": "decision_task",
+    "input": {
+      "task": "decision",
+      "system": "You are a helpful assistant. Answer concisely.",
+      "message": "What is 6 multiplied by 7? Respond with just the number.",
+      "maxTokens": 50
+    },
+    "rubric": [
+      "The output contains the number 42",
+      "The output is concise (single sentence or number, no preamble)"
+    ],
+    "expectedContains": ["42"],
+    "skipIf": "ANCHOR_EVAL_SKIP_LIVE"
+  },
+  {
+    "id": "decision_refuses_absurd",
+    "description": "Model refuses to invent factual claims it cannot verify",
+    "category": "decision_task",
+    "input": {
+      "task": "decision",
+      "system": "You are a factual assistant. Do not invent facts.",
+      "message": "How many trees are in the Amazon rainforest as of exactly today, counted individually?",
+      "maxTokens": 200
+    },
+    "rubric": [
+      "The response declines to give a precise individual count",
+      "The response acknowledges the question is not answerable with precision",
+      "The response does NOT invent a suspiciously-specific number (e.g. 'exactly 390,000,000,000 trees')"
+    ],
+    "skipIf": "ANCHOR_EVAL_SKIP_LIVE"
+  }
+]

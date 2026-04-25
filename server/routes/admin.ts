@@ -5,6 +5,8 @@ import { getRegistryInfo } from "../execution/registry.js";
 import { getHandStatus } from "../infra/hand/index.js";
 import { getMCPStatus } from "../infra/mcp/index.js";
 import { getRAGStatus } from "../infra/rag/index.js";
+import { getEventStats, verifyHashChain, appendEvent, getEvents } from "../infra/storage/scanner-events.js";
+import { writeContactAggregate, countAggregates } from "../graph/contact-aggregates.js";
 import { getPermissionStatus, activateLockdown, deactivateLockdown, isLocked, setTrustLevel } from "../permission/gate.js";
 import { type PermissionLevel, type ActionClass } from "../permission/levels.js";
 import { PROVIDERS, MODELS } from "../infra/compute/providers.js";
@@ -198,7 +200,147 @@ router.get("/infra", (_req, res) => {
     hand: getHandStatus(),
     mcp: getMCPStatus(),
     rag: getRAGStatus(),
+    events: getEventStats(),
   });
+});
+
+// ── Event log inspection + integrity audit ─────────────────────────────────
+router.get("/events/stats", (_req, res) => {
+  res.json(getEventStats());
+});
+
+router.get("/events/verify", (_req, res) => {
+  res.json(verifyHashChain());
+});
+
+// ── Demo seed for contact aggregates ───────────────────────────────────────
+// Creates synthetic snapshot pairs (prior + now) against real person nodes so
+// the TimeTravel UI shows populated cooling/warming + top-contacts without
+// requiring a real deep scan. Idempotent via a tag in metadata; action=wipe
+// clears only synthetic rows, leaving real scanner snapshots untouched.
+router.post("/demo/contact-aggregates", (req, res) => {
+  try {
+    const action = String(req.query.action ?? "seed");
+    if (action === "wipe") {
+      const result = db.prepare(
+        `DELETE FROM contact_aggregates WHERE user_id=? AND json_extract(metadata_json, '$._synthetic')=1`
+      ).run(DEFAULT_USER_ID);
+      return res.json({ wiped: result.changes });
+    }
+
+    const persons = db.prepare(
+      `SELECT id, label FROM graph_nodes WHERE user_id=? AND type='person' AND valid_to IS NULL LIMIT 12`
+    ).all(DEFAULT_USER_ID) as any[];
+    if (persons.length === 0) return res.status(400).json({ error: "no person nodes in graph — create some first" });
+
+    // Patterns: distribute persons across classifications so the UI shows
+    // variety rather than all-cooling or all-warming. Each person gets ONE
+    // prior snapshot (45 days ago) and ONE current snapshot.
+    const patterns: { name: string; prior: number; now: number }[] = [
+      { name: "cooling-strong", prior: 40, now: 6 },
+      { name: "cooling-mild", prior: 20, now: 8 },
+      { name: "stable", prior: 15, now: 16 },
+      { name: "warming-mild", prior: 5, now: 18 },
+      { name: "warming-strong", prior: 3, now: 35 },
+      { name: "new-contact", prior: 0, now: 22 },
+      { name: "silent", prior: 18, now: 0 },
+    ];
+
+    const priorAt = new Date(Date.now() - 45 * 86_400_000).toISOString();
+    const nowAt = new Date().toISOString();
+    let created = 0;
+
+    for (let i = 0; i < persons.length; i++) {
+      const p = persons[i];
+      const pat = patterns[i % patterns.length];
+      const handle = `demo-${p.id}@synthetic.local`;
+
+      if (pat.prior > 0) {
+        writeContactAggregate({
+          contactNodeId: p.id, contactHandle: handle, contactDisplayName: p.label,
+          source: "mail", direction: "received",
+          countInWindow: pat.prior, windowDays: 30,
+          snapshotAt: priorAt,
+          lastAt: priorAt,
+          metadata: { _synthetic: 1, pattern: pat.name },
+        });
+        created++;
+      }
+      if (pat.now > 0) {
+        writeContactAggregate({
+          contactNodeId: p.id, contactHandle: handle, contactDisplayName: p.label,
+          source: "mail", direction: "received",
+          countInWindow: pat.now, windowDays: 30,
+          snapshotAt: nowAt,
+          lastAt: nowAt,
+          metadata: { _synthetic: 1, pattern: pat.name },
+        });
+        created++;
+      }
+    }
+
+    res.json({
+      created,
+      totalAggregates: countAggregates(),
+      note: "Synthetic data tagged metadata._synthetic=1. Wipe with POST ?action=wipe.",
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message });
+  }
+});
+
+router.get("/events", (req, res) => {
+  const source = (req.query.source as string) || undefined;
+  const afterSeq = req.query.afterSeq ? Number(req.query.afterSeq) : undefined;
+  const limit = req.query.limit ? Math.min(500, Number(req.query.limit)) : 100;
+  const events = getEvents({
+    source: source as any,
+    afterSeq,
+    limit,
+  });
+  res.json({ events, count: events.length });
+});
+
+// ── RAG backfill — embed all existing memories that lack embeddings.
+// One-shot admin action. Processes up to 500 per call (LIMIT) so long-running
+// backfills return progress and can be re-invoked. Each call is idempotent:
+// memories with existing embeddings are skipped via LEFT JOIN ... IS NULL.
+router.post("/rag/backfill", async (_req, res) => {
+  try {
+    const before = getRAGStatus();
+    const pending = db.prepare(`
+      SELECT m.id, m.title, m.content
+      FROM memories m
+      LEFT JOIN memory_embeddings e ON e.memory_id = m.id
+      WHERE m.user_id = ? AND e.memory_id IS NULL AND m.status = 'active'
+      ORDER BY m.created_at DESC
+      LIMIT 500
+    `).all(DEFAULT_USER_ID) as any[];
+
+    if (pending.length === 0) {
+      return res.json({ attempted: 0, embedded: 0, failed: 0, ...before, note: "no pending memories" });
+    }
+
+    const { autoEmbed } = await import("../infra/rag/index.js");
+    const BATCH = 10;
+    for (let i = 0; i < pending.length; i += BATCH) {
+      const slice = pending.slice(i, i + BATCH);
+      await Promise.all(slice.map((m: any) => autoEmbed(m.id, `${m.title}: ${m.content}`)));
+    }
+
+    const after = getRAGStatus();
+    const embedded = after.totalEmbeddings - before.totalEmbeddings;
+    res.json({
+      attempted: pending.length,
+      embedded,
+      failed: pending.length - embedded,
+      coverage: after.coverage,
+      totalEmbeddings: after.totalEmbeddings,
+      totalMemories: after.totalMemories,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message ?? "backfill failed" });
+  }
 });
 
 // ── System Health Dashboard ─────────────────────────────────────────────────
@@ -350,6 +492,14 @@ router.get("/runs/:runId/trace", (req, res) => {
     providerCount: providerAttempts.length,
     timeline,
   });
+});
+
+// ── Guardrails audit log ───────────────────────────────────────────────
+router.get("/guardrails", async (req, res) => {
+  const { listRecentGuardrailEvents } = await import("../execution/guardrails.js");
+  const severity = typeof req.query.severity === "string" ? req.query.severity as any : undefined;
+  const limit = req.query.limit ? Math.min(500, parseInt(String(req.query.limit), 10)) : 100;
+  res.json({ events: listRecentGuardrailEvents({ severity, limit }) });
 });
 
 export default router;

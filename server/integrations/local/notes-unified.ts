@@ -22,6 +22,7 @@ import path from "path";
 import os from "os";
 import Database from "better-sqlite3";
 import { findApp } from "./app-registry.js";
+import { shadowEmit } from "../../infra/storage/scanner-events.js";
 
 const HOME = os.homedir();
 
@@ -40,6 +41,8 @@ export interface NoteApp {
   topTags?: string[];
   folderCount?: number;
   lastEditAt?: string;
+  avgNoteBytes?: number;          // thought-length fingerprint
+  p90NoteBytes?: number;          // long-form tail
 }
 
 export interface NotesUnifiedSummary {
@@ -87,12 +90,15 @@ function scanMarkdownDir(dirPath: string, opts: { maxFiles?: number; maxDepth?: 
   tags: string[];
   folderCount: number;
   lastEdit?: string;
+  avgBytes: number;
+  p90Bytes: number;
 } {
   const maxFiles = opts.maxFiles ?? 2000;
   const maxDepth = opts.maxDepth ?? 4;
   const titleWords = new Map<string, number>();
   const tagCounts = new Map<string, number>();
   const folders = new Set<string>();
+  const sizes: number[] = [];
   let count = 0;
   let recent = 0;
   let lastEdit = "";
@@ -116,8 +122,8 @@ function scanMarkdownDir(dirPath: string, opts: { maxFiles?: number; maxDepth?: 
         const mtime = stat.mtime.toISOString();
         if (mtime > lastEdit) lastEdit = mtime;
         if (stat.mtime.getTime() > thirtyDaysAgo) recent++;
+        sizes.push(stat.size);
 
-        // Title words from filename
         const title = e.name.replace(/\.md$/, "");
         for (const w of title.split(/[\s_\-\/]+/)) {
           const clean = w.toLowerCase().replace(/[^\w\u4e00-\u9fff]/g, "");
@@ -126,7 +132,6 @@ function scanMarkdownDir(dirPath: string, opts: { maxFiles?: number; maxDepth?: 
           }
         }
 
-        // Tags from first 2KB of content
         try {
           const fd = fs.openSync(full, "r");
           const buf = Buffer.alloc(2048);
@@ -154,6 +159,10 @@ function scanMarkdownDir(dirPath: string, opts: { maxFiles?: number; maxDepth?: 
     .slice(0, 15)
     .map(([t]) => t);
 
+  sizes.sort((a, b) => a - b);
+  const avgBytes = sizes.length > 0 ? Math.round(sizes.reduce((s, x) => s + x, 0) / sizes.length) : 0;
+  const p90Bytes = sizes.length > 0 ? sizes[Math.min(sizes.length - 1, Math.floor(sizes.length * 0.9))] : 0;
+
   return {
     count,
     recent,
@@ -161,7 +170,45 @@ function scanMarkdownDir(dirPath: string, opts: { maxFiles?: number; maxDepth?: 
     tags,
     folderCount: folders.size,
     lastEdit: lastEdit || undefined,
+    avgBytes,
+    p90Bytes,
   };
+}
+
+// Logseq graph = dir containing both `pages/` and `journals/` subdirs with .md.
+// Scan usual roots; cheap even if nothing found.
+function detectLogseqGraphs(): string[] {
+  const roots = [HOME, path.join(HOME, "Documents"), path.join(HOME, "Desktop")];
+  const found: string[] = [];
+  function looksLikeLogseq(dir: string): boolean {
+    try {
+      return fs.existsSync(path.join(dir, "pages")) &&
+             fs.existsSync(path.join(dir, "journals"));
+    } catch { return false; }
+  }
+  for (const root of roots) {
+    let entries: fs.Dirent[];
+    try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch { continue; }
+    for (const e of entries) {
+      if (!e.isDirectory() || e.name.startsWith(".")) continue;
+      const full = path.join(root, e.name);
+      if (looksLikeLogseq(full)) found.push(full);
+      // one level deeper for Documents/foo/logseq-graph
+      if (root !== HOME) continue;
+    }
+    for (const e of entries) {
+      if (!e.isDirectory() || e.name.startsWith(".")) continue;
+      const full = path.join(root, e.name);
+      let sub: fs.Dirent[];
+      try { sub = fs.readdirSync(full, { withFileTypes: true }); } catch { continue; }
+      for (const s of sub) {
+        if (!s.isDirectory() || s.name.startsWith(".")) continue;
+        const graph = path.join(full, s.name);
+        if (!found.includes(graph) && looksLikeLogseq(graph)) found.push(graph);
+      }
+    }
+  }
+  return found;
 }
 
 const STOPWORDS = new Set([
@@ -173,40 +220,58 @@ const STOPWORDS = new Set([
 
 // ── Apple Notes (NoteStore.sqlite metadata) ──────────────────────────────
 
-function scanAppleNotes(): { noteCount: number; folderCount: number; lastEdit?: string } | null {
+function scanAppleNotes(): { noteCount: number; recentCount: number; folderCount: number; lastEdit?: string; tccLocked?: boolean } | null {
   const dbPath = path.join(HOME, "Library/Group Containers/group.com.apple.notes/NoteStore.sqlite");
   if (!fs.existsSync(dbPath)) return null;
   const tmp = path.join(os.tmpdir(), `anchor_notes_${Date.now()}.db`);
   try {
     fs.copyFileSync(dbPath, tmp);
-    // WAL/SHM aux
     for (const ext of ["-wal", "-shm"]) {
       const src = dbPath + ext;
       if (fs.existsSync(src)) try { fs.copyFileSync(src, tmp + ext); } catch {}
     }
     const db = new Database(tmp, { readonly: true, fileMustExist: true });
-    // Apple Notes schema: ZICCLOUDSYNCINGOBJECT with ZTITLE1 + ZMODIFICATIONDATE1
-    // Z_PK + Z_ENT narrows to note entity
+
+    // Filter to the ICNote entity — ZICCLOUDSYNCINGOBJECT also holds
+    // folders/attachments so a bare ZTITLE1 IS NOT NULL over-counts.
+    const noteEnt = (db.prepare(
+      `SELECT Z_ENT FROM Z_PRIMARYKEY WHERE Z_NAME = 'ICNote'`
+    ).get() as any)?.Z_ENT;
+    const folderEnt = (db.prepare(
+      `SELECT Z_ENT FROM Z_PRIMARYKEY WHERE Z_NAME = 'ICFolder'`
+    ).get() as any)?.Z_ENT;
+
+    const entClause = noteEnt ? `Z_ENT = ${noteEnt}` : `ZTITLE1 IS NOT NULL`;
     const noteCount = (db.prepare(
-      `SELECT COUNT(*) as c FROM ZICCLOUDSYNCINGOBJECT WHERE ZTITLE1 IS NOT NULL`
+      `SELECT COUNT(*) as c FROM ZICCLOUDSYNCINGOBJECT WHERE ${entClause}`
     ).get() as any)?.c ?? 0;
-    const folderCount = (db.prepare(
-      `SELECT COUNT(DISTINCT ZFOLDER) as c FROM ZICCLOUDSYNCINGOBJECT WHERE ZFOLDER IS NOT NULL`
-    ).get() as any)?.c ?? 0;
+
+    // Recent = modified in last 30d. ZMODIFICATIONDATE1 is CoreData seconds since 2001.
+    const thirtyAppleSec = (Date.now() / 1000 - 30 * 86400) - 978307200;
+    const recentCount = (db.prepare(
+      `SELECT COUNT(*) as c FROM ZICCLOUDSYNCINGOBJECT WHERE ${entClause} AND ZMODIFICATIONDATE1 > ?`
+    ).get(thirtyAppleSec) as any)?.c ?? 0;
+
+    const folderCount = folderEnt
+      ? (db.prepare(`SELECT COUNT(*) as c FROM ZICCLOUDSYNCINGOBJECT WHERE Z_ENT = ?`).get(folderEnt) as any)?.c ?? 0
+      : (db.prepare(`SELECT COUNT(DISTINCT ZFOLDER) as c FROM ZICCLOUDSYNCINGOBJECT WHERE ZFOLDER IS NOT NULL`).get() as any)?.c ?? 0;
+
     const last = db.prepare(
-      `SELECT MAX(ZMODIFICATIONDATE1) as last FROM ZICCLOUDSYNCINGOBJECT`
+      `SELECT MAX(ZMODIFICATIONDATE1) as last FROM ZICCLOUDSYNCINGOBJECT WHERE ${entClause}`
     ).get() as any;
     db.close();
     fs.unlinkSync(tmp);
-    // ZMODIFICATIONDATE1 is Apple Core Data seconds since 2001
     let lastEdit: string | undefined;
-    if (last?.last) {
-      const unix = (last.last + 978307200) * 1000;
-      lastEdit = new Date(unix).toISOString();
-    }
-    return { noteCount, folderCount, lastEdit };
-  } catch {
+    if (last?.last) lastEdit = new Date((last.last + 978307200) * 1000).toISOString();
+    return { noteCount, recentCount, folderCount, lastEdit };
+  } catch (err: any) {
     try { fs.unlinkSync(tmp); } catch {}
+    // TCC block is the common case on modern macOS — surface it so the Shadow
+    // Oracle can reason about Apple Notes absence instead of treating it as
+    // "no notes exist".
+    if (err?.code === "EPERM" || /not permitted|operation not permitted/i.test(err?.message ?? "")) {
+      return { noteCount: 0, recentCount: 0, folderCount: 0, tccLocked: true };
+    }
     return null;
   }
 }
@@ -311,6 +376,7 @@ export async function scanNotesUnified(): Promise<NotesUnifiedSummary> {
   const obsVaults = detectObsidianVaults();
   if (obsVaults.length > 0) {
     let total = 0, recent = 0, folderCount = 0, lastEdit = "";
+    let sizeSum = 0, p90Max = 0;
     const keywords = new Map<string, number>();
     const tags = new Map<string, number>();
     for (const v of obsVaults) {
@@ -318,6 +384,8 @@ export async function scanNotesUnified(): Promise<NotesUnifiedSummary> {
       total += s.count;
       recent += s.recent;
       folderCount += s.folderCount;
+      sizeSum += s.avgBytes * s.count;
+      if (s.p90Bytes > p90Max) p90Max = s.p90Bytes;
       if (s.lastEdit && s.lastEdit > lastEdit) lastEdit = s.lastEdit;
       s.keywords.forEach(k => keywords.set(k, (keywords.get(k) ?? 0) + 1));
       s.tags.forEach(t => tags.set(t, (tags.get(t) ?? 0) + 1));
@@ -334,6 +402,8 @@ export async function scanNotesUnified(): Promise<NotesUnifiedSummary> {
       topTags: Array.from(tags.keys()).slice(0, 10),
       folderCount,
       lastEditAt: lastEdit || undefined,
+      avgNoteBytes: total > 0 ? Math.round(sizeSum / total) : undefined,
+      p90NoteBytes: p90Max || undefined,
     });
   } else if (findApp("Obsidian")) {
     apps.push({
@@ -342,13 +412,59 @@ export async function scanNotesUnified(): Promise<NotesUnifiedSummary> {
     });
   }
 
+  // Logseq — detect graphs by structure (pages/ + journals/ siblings)
+  const logseqGraphs = detectLogseqGraphs();
+  if (logseqGraphs.length > 0) {
+    let total = 0, recent = 0, folderCount = 0, lastEdit = "";
+    let sizeSum = 0, p90Max = 0;
+    const keywords = new Map<string, number>();
+    const tags = new Map<string, number>();
+    for (const g of logseqGraphs) {
+      // Logseq puts content in pages/ and journals/ — scan those
+      for (const sub of ["pages", "journals"]) {
+        const subDir = path.join(g, sub);
+        if (!fs.existsSync(subDir)) continue;
+        const s = scanMarkdownDir(subDir, { maxDepth: 2 });
+        total += s.count;
+        recent += s.recent;
+        folderCount += s.folderCount;
+        sizeSum += s.avgBytes * s.count;
+        if (s.p90Bytes > p90Max) p90Max = s.p90Bytes;
+        if (s.lastEdit && s.lastEdit > lastEdit) lastEdit = s.lastEdit;
+        s.keywords.forEach(k => keywords.set(k, (keywords.get(k) ?? 0) + 1));
+        s.tags.forEach(t => tags.set(t, (tags.get(t) ?? 0) + 1));
+      }
+    }
+    const keyWords = Array.from(keywords.keys()).slice(0, 15);
+    keyWords.forEach(k => topicAgg.set(k, (topicAgg.get(k) ?? 0) + 1));
+    apps.push({
+      appId: "logseq", displayName: "Logseq",
+      installed: true, active: total > 0,
+      tier: "full-content",
+      noteCount: total, recentNoteCount: recent,
+      vaultPaths: logseqGraphs,
+      topKeywords: keyWords,
+      topTags: Array.from(tags.keys()).slice(0, 10),
+      folderCount,
+      lastEditAt: lastEdit || undefined,
+      avgNoteBytes: total > 0 ? Math.round(sizeSum / total) : undefined,
+      p90NoteBytes: p90Max || undefined,
+    });
+  }
+
   // Apple Notes
   const apple = scanAppleNotes();
-  if (apple && apple.noteCount > 0) {
+  if (apple?.tccLocked) {
+    apps.push({
+      appId: "apple-notes", displayName: "Apple Notes",
+      installed: true, active: false, tier: "api-only",
+    });
+  } else if (apple && apple.noteCount > 0) {
     apps.push({
       appId: "apple-notes", displayName: "Apple Notes",
       installed: true, active: true, tier: "metadata-only",
       noteCount: apple.noteCount,
+      recentNoteCount: apple.recentCount,
       folderCount: apple.folderCount,
       lastEditAt: apple.lastEdit,
     });
@@ -377,6 +493,8 @@ export async function scanNotesUnified(): Promise<NotesUnifiedSummary> {
   const PRESENCE_MAP: Record<string, string> = {
     notion: "Notion", craft: "Craft", roam: "Roam Research",
     logseq: "Logseq", heptabase: "Heptabase", drafts: "Drafts", mem: "Mem",
+    remnote: "RemNote", capacities: "Capacities", tana: "Tana",
+    reflect: "Reflect", anytype: "Anytype",
   };
   const appDirs = [
     "/Applications",
@@ -460,6 +578,47 @@ export async function scanNotesUnified(): Promise<NotesUnifiedSummary> {
     });
   }
 
+  // Thought-length fingerprint — short capture vs long-form essays
+  // is a direct identity signal (quick thinker vs slow synthesizer).
+  const writerApp = activeApps.find(a => typeof a.avgNoteBytes === "number" && (a.noteCount ?? 0) >= 10);
+  if (writerApp && writerApp.avgNoteBytes !== undefined) {
+    const avg = writerApp.avgNoteBytes;
+    const p90 = writerApp.p90NoteBytes ?? avg;
+    if (p90 >= 8000) {
+      signals.push({
+        name: "long-form-writer",
+        strength: "medium",
+        evidence: `${writerApp.displayName} avg ${Math.round(avg/1024)}KB/note, p90 ${Math.round(p90/1024)}KB — writes multi-page essays`,
+      });
+    } else if (avg < 400 && (writerApp.noteCount ?? 0) > 30) {
+      signals.push({
+        name: "quick-capture-note-taker",
+        strength: "medium",
+        evidence: `${writerApp.displayName} avg ${avg}B/note across ${writerApp.noteCount} notes — short fragments, not long-form`,
+      });
+    }
+  }
+
+  // Installed-but-unused PKM app is a specific identity signal:
+  // someone who tried to adopt a system and didn't stick.
+  const installedUnused = apps.filter(a => a.installed && !a.active && a.tier !== "presence-only" && a.tier !== "api-only");
+  if (installedUnused.length > 0 && scattered && scattered.count > 5) {
+    signals.push({
+      name: "pkm-abandoned-for-scatter",
+      strength: "strong",
+      evidence: `${installedUnused.map(a => a.displayName).join(" + ")} installed with 0 notes, but ${scattered.count} markdown files scattered elsewhere — tried the system, reverted to files`,
+    });
+  }
+
+  // Apple Notes TCC lock — common on modern macOS, worth surfacing
+  if (apple?.tccLocked) {
+    signals.push({
+      name: "apple-notes-tcc-locked",
+      strength: "weak",
+      evidence: "Apple Notes DB exists but is TCC-locked — content invisible to Anchor without Full Disk Access",
+    });
+  }
+
   // Topic recency — merge scattered filenames for topic inference
   const recentTopics: string[] = [];
   for (const app of activeApps) {
@@ -478,7 +637,7 @@ export async function scanNotesUnified(): Promise<NotesUnifiedSummary> {
 
   const coverage = buildCoverage(apps, scattered);
 
-  return {
+  const result: NotesUnifiedSummary = {
     apps,
     totalAppsInstalled: apps.filter(a => a.installed).length,
     totalActiveSystems: activeApps.length + (scattered && scattered.count > 3 ? 1 : 0),
@@ -490,6 +649,25 @@ export async function scanNotesUnified(): Promise<NotesUnifiedSummary> {
     signals,
     coverage,
   };
+
+  shadowEmit({
+    scanner: "notes-unified",
+    source: "notes",
+    kind: "notes_scan_summary",
+    stableFields: { scanDay: new Date().toISOString().slice(0, 10) },
+    payload: {
+      totalAppsInstalled: result.totalAppsInstalled,
+      totalActiveSystems: result.totalActiveSystems,
+      primarySystem: result.primarySystem,
+      totalNoteCount: result.totalNoteCount,
+      totalRecentNoteCount: result.totalRecentNoteCount,
+      recentTopics: result.recentTopics?.slice(0, 15),
+      apps: result.apps.map(a => ({ id: a.appId, active: a.active, tier: a.tier, noteCount: a.noteCount })),
+      scatteredCount: result.scatteredMarkdown?.count ?? 0,
+    },
+  });
+
+  return result;
 }
 
 function dedupe(arr: string[]): string[] {
@@ -524,6 +702,7 @@ export function notesUnifiedToText(summary: NotesUnifiedSummary): string {
     const line = `    [${app.tier}] ${app.displayName}: ${app.noteCount ?? 0} notes`
       + (app.recentNoteCount ? ` (${app.recentNoteCount} recent)` : "")
       + (app.folderCount ? `, ${app.folderCount} folders` : "")
+      + (app.avgNoteBytes ? `, avg ${app.avgNoteBytes < 1024 ? `${app.avgNoteBytes}B` : `${Math.round(app.avgNoteBytes/1024)}KB`}/note` : "")
       + (app.lastEditAt ? `, last edit ${app.lastEditAt.slice(0, 10)}` : "");
     lines.push(line);
     if (app.topTags && app.topTags.length > 0) lines.push(`      top tags: ${app.topTags.slice(0, 6).map(t => `#${t}`).join(" ")}`);

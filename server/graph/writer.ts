@@ -87,8 +87,9 @@ export function unlockBlockedNodes(): number {
 
 export function createEdge(fromNodeId: string, toNodeId: string, type: EdgeType | string, weight = 1.0, metadata?: string): string {
   const id = nanoid();
+  // valid_from = now (edge is currently active). valid_to stays NULL until closed.
   db.prepare(
-    "INSERT INTO graph_edges (id, user_id, from_node_id, to_node_id, type, weight, metadata) VALUES (?,?,?,?,?,?,?)"
+    "INSERT INTO graph_edges (id, user_id, from_node_id, to_node_id, type, weight, metadata, valid_from) VALUES (?,?,?,?,?,?,?,datetime('now'))"
   ).run(id, DEFAULT_USER_ID, fromNodeId, toNodeId, type, weight, metadata ?? null);
   return id;
 }
@@ -99,4 +100,58 @@ export function deleteEdge(edgeId: string): boolean {
 
 export function deleteEdgesBetween(fromId: string, toId: string): number {
   return db.prepare("DELETE FROM graph_edges WHERE user_id=? AND from_node_id=? AND to_node_id=?").run(DEFAULT_USER_ID, fromId, toId).changes;
+}
+
+/**
+ * Soft-close an edge: set valid_to=now. The row stays in the table so history
+ * queries can see "this tie existed from X to Y". Prefer this over deleteEdge
+ * for any meaningful relationship — hard delete loses the evolution trail.
+ */
+export function closeEdge(edgeId: string): boolean {
+  return db.prepare(
+    "UPDATE graph_edges SET valid_to=datetime('now') WHERE id=? AND user_id=? AND valid_to IS NULL"
+  ).run(edgeId, DEFAULT_USER_ID).changes > 0;
+}
+
+/**
+ * Soft-close contextual-ish edges that have not been re-confirmed by any
+ * profile inference (or other edge-opening flow) in `maxAgeDays` — these
+ * are relationships the scanner hasn't seen fresh evidence for in a long
+ * time. Keeps the edge row for history (valid_to stamped), returns count.
+ *
+ * Applied only to types that represent "time-sensitive ties" — `contextual`
+ * (person-to-person strength) and `supports` (identity → interest backing).
+ * Structural edges like `depends_on` or `conflicts_with` are intentionally
+ * excluded because they don't decay simply by not being re-mentioned.
+ */
+export function closeStaleEdges(maxAgeDays: number, types: string[] = ["contextual", "supports"]): number {
+  const placeholders = types.map(() => "?").join(",");
+  const result = db.prepare(
+    `UPDATE graph_edges SET valid_to = datetime('now')
+     WHERE user_id = ?
+       AND valid_to IS NULL
+       AND type IN (${placeholders})
+       AND julianday('now') - julianday(valid_from) > ?`
+  ).run(DEFAULT_USER_ID, ...types, maxAgeDays);
+  return result.changes;
+}
+
+/**
+ * Open a new version of a relationship: soft-close any currently-active edges
+ * matching (from, to, type), then create a fresh edge. Returns the new edge id.
+ * This is how relationship weight changes get recorded as history versions.
+ */
+export function replaceEdgeVersion(
+  fromNodeId: string,
+  toNodeId: string,
+  type: EdgeType | string,
+  weight: number,
+  metadata?: string,
+): string {
+  return transact(() => {
+    db.prepare(
+      "UPDATE graph_edges SET valid_to=datetime('now') WHERE user_id=? AND from_node_id=? AND to_node_id=? AND type=? AND valid_to IS NULL"
+    ).run(DEFAULT_USER_ID, fromNodeId, toNodeId, type);
+    return createEdge(fromNodeId, toNodeId, type, weight, metadata);
+  });
 }

@@ -62,7 +62,24 @@ async function handleConfirmed(payload: any) {
     console.error("[Twin Sidecar] Error:", err.message)
   );
 
-  // Run Execution Agent
+  // Phase 2 of #2 — SessionRunner is now the default execution path.
+  // Opt-out via ANCHOR_LEGACY_REACT=true (forces legacy ReAct).
+  // Safety net: if startSession throws or no sessionId was compiled, we
+  // fall through to the legacy path so the user is never stranded mid-flow.
+  const forceLegacy = process.env.ANCHOR_LEGACY_REACT === "true";
+  if (!forceLegacy && payload.sessionId) {
+    try {
+      const { startSession } = await import("./session-runner.js");
+      startSession(payload.sessionId);
+      console.log(`[Orchestrator] session ${payload.sessionId.slice(0, 6)} routed to SessionRunner`);
+      return;
+    } catch (err: any) {
+      console.error(`[Orchestrator] SessionRunner failed to take over (${err?.message}) — falling back to legacy ReAct`);
+      // fall through
+    }
+  }
+
+  // Legacy path (forced via env, or no sessionId, or startSession threw)
   await runExecutionReAct(payload.user_steps);
 }
 
@@ -109,5 +126,35 @@ export function startEventHandlers() {
     }
   });
 
-  console.log("⚡ Orchestration: mode-based routing | handoff enforcement | event persistence | error retry");
+  // Sprint B — #4: APPROVAL_DECIDED reverse-syncs back to source-specific
+  // state. Inbox is the front door; sources keep their own state but learn
+  // about user decisions through this event.
+  bus.on("event", async (e: AnchorEvent) => {
+    if (e.type !== "APPROVAL_DECIDED") return;
+    const { source, sourceRefId, approved } = e.payload;
+    try {
+      const { db } = await import("../infra/storage/db.js");
+      if (source === "app") {
+        // sourceRefId = "appIdentifier::scope" — split + write app_approvals
+        const [appIdentifier, scope] = String(sourceRefId).split("::");
+        if (appIdentifier && scope) {
+          db.prepare(
+            "UPDATE app_approvals SET status=? WHERE user_id=? AND app_identifier=? AND scope=?"
+          ).run(approved ? "approved" : "denied", "default", appIdentifier, scope);
+        }
+      }
+      // 'run' source: user reply still flows through /runs/:id/resume — the
+      // approval row is informational only. Same for 'gate' (audit log only).
+      if (source === "step") {
+        // Phase 2 of #2 — sourceRefId IS the step id. Flip approval
+        // decision; SessionRunner picks it up next tick.
+        const { applyStepApprovalDecision } = await import("./session-runner.js");
+        applyStepApprovalDecision(sourceRefId, !!approved);
+      }
+    } catch (err: any) {
+      console.error("[Orchestrator] APPROVAL_DECIDED reconciliation failed:", err.message);
+    }
+  });
+
+  console.log("⚡ Orchestration: mode-based routing | handoff enforcement | event persistence | error retry | approval inbox sync");
 }

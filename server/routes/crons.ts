@@ -5,28 +5,78 @@
 import { Router } from "express";
 import { db, DEFAULT_USER_ID } from "../infra/storage/db.js";
 import { nanoid } from "nanoid";
+import { parseCronConfig, CronConfigSchema } from "../cognition/agent-config.js";
 
 const router = Router();
 
 router.get("/", (_req, res) => {
   const crons = db.prepare("SELECT * FROM user_crons WHERE user_id=? ORDER BY created_at DESC").all(DEFAULT_USER_ID);
-  res.json(crons);
+  // Expose parsed config so frontend can show purpose / vitality / snooze state.
+  res.json(crons.map((c: any) => ({ ...c, config: parseCronConfig(c.config_json) })));
 });
 
 router.post("/", (req, res) => {
-  const { name, cron_pattern, action_type, action_config, source } = req.body;
+  const { name, cron_pattern, action_type, action_config, source, config } = req.body;
   if (!name || !cron_pattern || !action_type) return res.status(400).json({ error: "name, cron_pattern, action_type required" });
+
+  // Optional structured config (purpose/voice/conditions/snooze/vitality)
+  const parsed = CronConfigSchema.safeParse(config ?? {});
+  if (config && !parsed.success) {
+    return res.status(400).json({ error: "invalid config shape", details: parsed.error.message });
+  }
+  const finalConfig = parsed.success ? parsed.data : CronConfigSchema.parse({});
+  if (!finalConfig.purpose) finalConfig.purpose = String(name);
+
   const id = nanoid();
-  db.prepare("INSERT INTO user_crons (id, user_id, name, cron_pattern, action_type, action_config, source) VALUES (?,?,?,?,?,?,?)")
-    .run(id, DEFAULT_USER_ID, name, cron_pattern, action_type, JSON.stringify(action_config ?? {}), source ?? "user");
+  db.prepare(
+    "INSERT INTO user_crons (id, user_id, name, cron_pattern, action_type, action_config, source, config_json) VALUES (?,?,?,?,?,?,?,?)"
+  ).run(
+    id, DEFAULT_USER_ID, name, cron_pattern, action_type,
+    JSON.stringify(action_config ?? {}),
+    source ?? "user",
+    JSON.stringify(finalConfig),
+  );
   res.json({ id });
 });
 
 router.put("/:id", (req, res) => {
-  const { name, cron_pattern, action_type, action_config } = req.body;
-  db.prepare("UPDATE user_crons SET name=?, cron_pattern=?, action_type=?, action_config=? WHERE id=? AND user_id=?")
-    .run(name, cron_pattern, action_type, JSON.stringify(action_config ?? {}), req.params.id, DEFAULT_USER_ID);
+  const { name, cron_pattern, action_type, action_config, config } = req.body;
+
+  // Merge-style update — same pattern as user_agents PUT
+  let configJsonForWrite: string | null = null;
+  if (config !== undefined) {
+    const existing = db.prepare("SELECT config_json FROM user_crons WHERE id=? AND user_id=?").get(req.params.id, DEFAULT_USER_ID) as any;
+    const current = parseCronConfig(existing?.config_json);
+    const merged = { ...current, ...config };
+    const parsed = CronConfigSchema.safeParse(merged);
+    if (!parsed.success) {
+      return res.status(400).json({ error: "invalid config shape", details: parsed.error.message });
+    }
+    configJsonForWrite = JSON.stringify(parsed.data);
+  }
+
+  if (configJsonForWrite !== null) {
+    db.prepare("UPDATE user_crons SET name=?, cron_pattern=?, action_type=?, action_config=?, config_json=? WHERE id=? AND user_id=?")
+      .run(name, cron_pattern, action_type, JSON.stringify(action_config ?? {}), configJsonForWrite, req.params.id, DEFAULT_USER_ID);
+  } else {
+    db.prepare("UPDATE user_crons SET name=?, cron_pattern=?, action_type=?, action_config=? WHERE id=? AND user_id=?")
+      .run(name, cron_pattern, action_type, JSON.stringify(action_config ?? {}), req.params.id, DEFAULT_USER_ID);
+  }
   res.json({ ok: true });
+});
+
+// Snooze a cron — pause until ISO timestamp (typically tomorrow / next week).
+// Lives under the cron config rather than a flat column because conceptually
+// "paused state" is part of the cron's lifecycle, alongside vitality.
+router.post("/:id/snooze", (req, res) => {
+  const { until } = req.body;  // ISO string; null/empty clears snooze
+  const existing = db.prepare("SELECT config_json FROM user_crons WHERE id=? AND user_id=?").get(req.params.id, DEFAULT_USER_ID) as any;
+  if (!existing) return res.status(404).json({ error: "cron not found" });
+  const current = parseCronConfig(existing.config_json);
+  const updated = { ...current, snooze_until: until || null };
+  db.prepare("UPDATE user_crons SET config_json=? WHERE id=? AND user_id=?")
+    .run(JSON.stringify(updated), req.params.id, DEFAULT_USER_ID);
+  res.json({ ok: true, snooze_until: updated.snooze_until });
 });
 
 router.delete("/:id", (req, res) => {

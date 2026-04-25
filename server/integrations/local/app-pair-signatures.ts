@@ -528,9 +528,8 @@ export function signaturesToText(matched: MatchedSignature[]): string {
     lines.push(`\n  ${cat.toUpperCase()}:`);
     for (const m of list) {
       const label = `[${m.strength}]`.padEnd(8);
-      const evidence = m.reqMatched.length > 0 ? ` — evidence: ${m.reqMatched.slice(0, 4).join(", ")}${m.reqMatched.length > 4 ? ", ..." : ""}` : "";
+      const evidence = m.reqMatched.length > 0 ? ` — ${m.reqMatched.slice(0, 4).join(", ")}${m.reqMatched.length > 4 ? ", ..." : ""}` : "";
       lines.push(`    ${label} ${m.signal}${evidence}`);
-      lines.push(`             └─ ${m.description}`);
     }
   }
   return lines.join("\n");

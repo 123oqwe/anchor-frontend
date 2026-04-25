@@ -23,7 +23,13 @@
 import crypto from "crypto";
 import { nanoid } from "nanoid";
 import { db } from "../infra/storage/db.js";
-import { text as llmText } from "../infra/compute/index.js";
+import { object } from "../infra/compute/index.js";
+import { z } from "zod";
+
+const SkillNameSchema = z.object({
+  name: z.string(),
+  description: z.string(),
+});
 
 const CRYSTALLIZE_THRESHOLD = 3;
 
@@ -114,19 +120,19 @@ The code uses these anchor APIs: ${opts.calls.join(", ")}.`;
   let description = `Reusable pattern using ${opts.calls.slice(0, 3).join(", ")}`;
 
   try {
-    const raw = await llmText({
+    const json = await object({
       task: "twin_edit_learning",
       system,
       messages: [{ role: "user", content: user }],
+      schema: SkillNameSchema,
       maxTokens: 200,
       runId: opts.runId,
       agentName: `SkillExtractor (${opts.agentName})`,
     });
-    const json = JSON.parse(raw.match(/\{[\s\S]*\}/)?.[0] ?? "{}");
-    if (typeof json.name === "string" && json.name.trim()) {
+    if (json.name.trim()) {
       name = json.name.trim().replace(/[^a-z_0-9]/gi, "_").toLowerCase().slice(0, 40);
     }
-    if (typeof json.description === "string" && json.description.trim()) {
+    if (json.description.trim()) {
       description = json.description.trim().slice(0, 200);
     }
   } catch (err: any) {

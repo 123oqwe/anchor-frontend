@@ -14,6 +14,8 @@ import { createNode } from "../graph/writer.js";
 import { writeMemory, flushConversationToMemory, checkPeriodicNudge } from "../memory/retrieval.js";
 import { trackPlanDecision } from "../cognition/twin.js";
 import { tryCrystallizeSkill, evolveSkill, penalizeSkill } from "../cognition/skills.js";
+import { recordOutcome } from "../orchestration/experiment-runner.js";
+import { compileAndPersistPlan } from "../cognition/plan-compiler.js";
 
 // ── Zod schemas ─────────────────────────────────────────────────────────────
 const MessageBody = z.object({ message: z.string().min(1) });
@@ -85,13 +87,16 @@ router.post("/personal", async (req: Request, res: Response) => {
     const nudge = checkPeriodicNudge();
     const augmentedMessage = nudge ? `${message}\n\n${nudge}` : message;
 
-    // L3 Cognition — pure reasoning
-    const result = await decide(augmentedMessage, history);
-
-    // Persist to messages
-    const msgId = nanoid();
+    // Persist user message first so its id can serve as contextRef for any
+    // downstream A/B attribution (decision prompt experiment links here).
+    const userMsgId = nanoid();
     const insertMsg = db.prepare("INSERT INTO messages (id, user_id, mode, role, content, draft_type, draft_status, agent_name) VALUES (?,?,?,?,?,?,?,?)");
-    insertMsg.run(nanoid(), DEFAULT_USER_ID, "personal", "user", message, null, null, null);
+    insertMsg.run(userMsgId, DEFAULT_USER_ID, "personal", "user", message, null, null, null);
+
+    // L3 Cognition — pure reasoning
+    const result = await decide(augmentedMessage, history, { contextRef: userMsgId });
+
+    const msgId = nanoid();
     insertMsg.run(msgId, DEFAULT_USER_ID, "personal", result.isPlan ? "draft" : "advisor", result.raw, result.isPlan ? "plan" : null, result.isPlan ? "pending" : null, null);
 
     logExecution("Decision Agent", `${result.isPlan ? "Plan" : "Advice"}: ${message.substring(0, 60)}`);
@@ -152,7 +157,12 @@ router.post("/personal/stream", async (req: Request, res: Response) => {
     const nudge = checkPeriodicNudge();
     const augmentedMessage = nudge ? `${message}\n\n${nudge}` : message;
 
-    const { stream, fullText } = await decideStream(augmentedMessage, history);
+    // Insert user message first → its id is the A/B contextRef.
+    const userMsgId = nanoid();
+    const insertMsg = db.prepare("INSERT INTO messages (id, user_id, mode, role, content, draft_type, draft_status, agent_name) VALUES (?,?,?,?,?,?,?,?)");
+    insertMsg.run(userMsgId, DEFAULT_USER_ID, "personal", "user", message, null, null, null);
+
+    const { stream, fullText } = await decideStream(augmentedMessage, history, { contextRef: userMsgId });
 
     // Stream chunks to client
     for await (const chunk of stream) {
@@ -162,8 +172,6 @@ router.post("/personal/stream", async (req: Request, res: Response) => {
     // Get full text and persist
     const raw = await fullText;
     const msgId = nanoid();
-    const insertMsg = db.prepare("INSERT INTO messages (id, user_id, mode, role, content, draft_type, draft_status, agent_name) VALUES (?,?,?,?,?,?,?,?)");
-    insertMsg.run(nanoid(), DEFAULT_USER_ID, "personal", "user", message, null, null, null);
     insertMsg.run(msgId, DEFAULT_USER_ID, "personal", "advisor", raw, null, null, null);
 
     logExecution("Decision Agent", `Stream: ${message.substring(0, 60)}`);
@@ -210,6 +218,24 @@ router.post("/confirm", async (req: Request, res: Response) => {
     recordSatisfaction("plan_modified", `${editCount}/${user_steps.length} steps edited`, 1.0 - editRatio);
   }
 
+  // Sprint A — #7: attribute outcome to A/B assignment(s) for the originating
+  // user message. Best-effort lookup: latest user message in personal mode
+  // before the most recent draft. Personal-AI cadence is slow enough that
+  // this is unambiguous; if user fires two plans in <1s the second loses.
+  try {
+    const sourceUserMsg = db.prepare(
+      `SELECT id FROM messages
+        WHERE user_id=? AND mode='personal' AND role='user'
+        ORDER BY created_at DESC LIMIT 1`
+    ).get(DEFAULT_USER_ID) as any;
+    if (sourceUserMsg?.id) {
+      recordOutcome({ contextRef: sourceUserMsg.id, signalType: "plan_confirmed", value: 1.0 });
+      if (editRatio > 0) {
+        recordOutcome({ contextRef: sourceUserMsg.id, signalType: "plan_modified", value: 1.0 - editRatio });
+      }
+    }
+  } catch (e) { console.error("[Advisor] A/B outcome attribution failed:", e); }
+
   // L1 writeback: record the decision in the graph (short label, steps in detail)
   const firstStep = user_steps[0]?.content?.slice(0, 30) ?? "Plan";
   createNode({ domain: "work", label: `Decision: ${firstStep}`, type: "decision", status: "active", captured: "Plan confirmed by user", detail: user_steps.map((s: any) => s.content).join("; ").slice(0, 200) });
@@ -217,7 +243,31 @@ router.post("/confirm", async (req: Request, res: Response) => {
   // Note: plan decision memory is recorded by Twin's trackPlanDecision() in handlers.ts
   // No duplicate writeMemory here.
 
-  bus.publish({ type: "USER_CONFIRMED", payload: { original_steps, user_steps, changes } });
+  // Phase 1 of #2 — compile plan into structured session rows. Shadow mode:
+  // old runExecutionReAct (triggered by USER_CONFIRMED below) still does the
+  // actual work; the new tables only enable UI visibility. Compile failure
+  // is non-fatal — old path proceeds regardless.
+  let sessionId: string | null = null;
+  try {
+    const sourceUserMsg = db.prepare(
+      `SELECT id, content FROM messages WHERE user_id=? AND mode='personal' AND role='user'
+        ORDER BY created_at DESC LIMIT 1`
+    ).get(DEFAULT_USER_ID) as any;
+    const goal = sourceUserMsg?.content?.slice(0, 500) ?? user_steps.map((s: any) => s.content).join("; ").slice(0, 500);
+    const compileResult = await compileAndPersistPlan(
+      { goal, steps: user_steps },
+      "advisor_confirm",
+      sourceUserMsg?.id,
+    );
+    sessionId = compileResult.sessionId;
+    if (!compileResult.ok) {
+      console.warn(`[Advisor] Plan compile failed (session ${sessionId}): ${compileResult.error}`);
+    }
+  } catch (err: any) {
+    console.error("[Advisor] Plan compile threw:", err?.message);
+  }
+
+  bus.publish({ type: "USER_CONFIRMED", payload: { original_steps, user_steps, changes, sessionId: sessionId ?? undefined } });
 
   // Skills: try to crystallize a new skill from confirmed patterns (non-blocking)
   const stepContents = user_steps.map((s: any) => s.content);
@@ -237,7 +287,7 @@ router.post("/confirm", async (req: Request, res: Response) => {
     }
   } catch (e) { console.error("[Advisor] Skill evolution failed:", e); }
 
-  res.json({ ok: true, changes });
+  res.json({ ok: true, changes, sessionId });
 });
 
 // ── Reject Plan ──────────────────────────────────────────────────────────────
@@ -250,6 +300,18 @@ router.post("/reject", (req: Request, res: Response) => {
 
   // Satisfaction: plan rejected = negative signal
   recordSatisfaction("plan_rejected", stepSummary.slice(0, 100), -1.0);
+
+  // Sprint A — #7: same attribution path as confirm.
+  try {
+    const sourceUserMsg = db.prepare(
+      `SELECT id FROM messages
+        WHERE user_id=? AND mode='personal' AND role='user'
+        ORDER BY created_at DESC LIMIT 1`
+    ).get(DEFAULT_USER_ID) as any;
+    if (sourceUserMsg?.id) {
+      recordOutcome({ contextRef: sourceUserMsg.id, signalType: "plan_rejected", value: -1.0 });
+    }
+  } catch (e) { console.error("[Advisor] A/B outcome attribution failed:", e); }
 
   // Track rejection for Twin pattern learning
   trackPlanDecision("rejected", stepSummary, Array.isArray(steps) ? steps.length : 0);
@@ -331,11 +393,13 @@ router.post("/universal", async (req: Request, res: Response) => {
     const safeContext = context && ALLOWED_PAGES.some(p => context.startsWith(p)) ? context.replace(/[\n\r\[\]]/g, " ").slice(0, 50) : undefined;
     const augmented = safeContext ? `[Context: user is on ${safeContext}]\n${message}` : message;
 
-    const result = await decide(augmented, history);
+    const userMsgId = nanoid();
+    const insertMsg = db.prepare("INSERT INTO messages (id, user_id, mode, role, content, draft_type, draft_status, agent_name) VALUES (?,?,?,?,?,?,?,?)");
+    insertMsg.run(userMsgId, DEFAULT_USER_ID, "personal", "user", message, null, null, null);
+
+    const result = await decide(augmented, history, { contextRef: userMsgId });
 
     const msgId = nanoid();
-    const insertMsg = db.prepare("INSERT INTO messages (id, user_id, mode, role, content, draft_type, draft_status, agent_name) VALUES (?,?,?,?,?,?,?,?)");
-    insertMsg.run(nanoid(), DEFAULT_USER_ID, "personal", "user", message, null, null, null);
     insertMsg.run(msgId, DEFAULT_USER_ID, "personal", result.isPlan ? "draft" : "advisor", result.raw, result.isPlan ? "plan" : null, result.isPlan ? "pending" : null, null);
 
     writeMemory({ type: "episodic", title: `Conversation: ${message.slice(0, 50)}`, content: `User: ${message.slice(0, 150)} | Anchor: ${result.raw.slice(0, 150)}`, tags: extractConversationTags(message), source: "Decision Agent", confidence: 0.8 });

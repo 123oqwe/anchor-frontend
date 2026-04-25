@@ -1,111 +1,81 @@
 /**
- * MCP Server Management — connect external MCP servers + expose Anchor as MCP.
+ * MCP management routes — configure external MCP servers, connect/disconnect,
+ * discover tools. Inbound MCP (Anchor as client). Mount at /api/mcp.
  */
 import { Router } from "express";
-import { db, DEFAULT_USER_ID } from "../infra/storage/db.js";
-import { nanoid } from "nanoid";
-import { registerTool } from "../execution/registry.js";
+import {
+  createServer, listServers, loadServer, deleteServer,
+  connectServer, disconnectServer,
+} from "../integrations/mcp/registry.js";
 
 const router = Router();
 
-// Status — list connected servers + exposed tools
-router.get("/status", (_req, res) => {
-  const servers = db.prepare("SELECT * FROM mcp_servers WHERE user_id=?").all(DEFAULT_USER_ID) as any[];
-  const { getAllTools } = require("../execution/registry.js");
-  const anchorTools = getAllTools().map((t: any) => t.name);
-
-  res.json({
-    anchor: { exposedTools: anchorTools.length, tools: anchorTools },
-    external: servers.map((s: any) => ({
-      id: s.id, name: s.name, url: s.url, status: s.status,
-      tools: JSON.parse(s.tools_json), lastConnected: s.last_connected,
-    })),
-  });
+router.get("/servers", (_req, res) => {
+  res.json({ servers: listServers() });
 });
 
-// Connect to external MCP server
-router.post("/connect", async (req, res) => {
-  const { name, url } = req.body;
-  if (!name || !url) return res.status(400).json({ error: "name and url required" });
+router.get("/servers/:id", (req, res) => {
+  const s = loadServer(req.params.id);
+  if (!s) return res.status(404).json({ error: "not found" });
+  res.json({ server: s });
+});
 
+router.post("/servers", (req, res) => {
+  const body = req.body ?? {};
+  if (!body.name || typeof body.name !== "string") {
+    return res.status(400).json({ error: "name required" });
+  }
+  const transport = body.transport ?? "stdio";
+  if (transport === "stdio" && !body.command) {
+    return res.status(400).json({ error: "command required for stdio transport" });
+  }
   try {
-    // Discover tools via JSON-RPC tools/list
-    const listRes = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ jsonrpc: "2.0", method: "tools/list", id: 1 }),
+    const server = createServer({
+      name: body.name,
+      transport,
+      command: body.command,
+      args: Array.isArray(body.args) ? body.args : [],
+      env: typeof body.env === "object" && body.env !== null ? body.env : {},
+      url: body.url,
+      enabled: body.enabled !== false,
     });
-    const listData = await listRes.json();
-    const tools = listData.result?.tools ?? [];
-
-    // Register each tool as a proxy in L5 registry
-    for (const tool of tools) {
-      registerTool({
-        name: `mcp_${tool.name}`,
-        description: `[MCP: ${name}] ${tool.description ?? ""}`,
-        handler: "api" as any,
-        actionClass: "agent_autonomous" as any,
-        inputSchema: tool.inputSchema ?? { type: "object", properties: {} },
-        execute: async (input: any) => {
-          try {
-            const callRes = await fetch(url, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ jsonrpc: "2.0", method: "tools/call", params: { name: tool.name, arguments: input }, id: Date.now() }),
-            });
-            const callData = await callRes.json();
-            const text = callData.result?.content?.[0]?.text ?? JSON.stringify(callData.result ?? {});
-            return { success: !callData.result?.isError, output: text };
-          } catch (err: any) {
-            return { success: false, output: `MCP call failed: ${err.message}`, error: err.message };
-          }
-        },
-      });
-    }
-
-    // Save to DB
-    const id = nanoid();
-    db.prepare("INSERT INTO mcp_servers (id, user_id, name, url, status, tools_json, last_connected) VALUES (?,?,?,?,?,?,datetime('now'))")
-      .run(id, DEFAULT_USER_ID, name, url, "connected", JSON.stringify(tools.map((t: any) => t.name)));
-
-    res.json({ id, connected: true, toolsDiscovered: tools.length, tools: tools.map((t: any) => t.name) });
+    res.json({ server });
   } catch (err: any) {
-    // Save as disconnected
-    const id = nanoid();
-    db.prepare("INSERT INTO mcp_servers (id, user_id, name, url, status) VALUES (?,?,?,?,?)")
-      .run(id, DEFAULT_USER_ID, name, url, "error");
-    res.status(500).json({ error: `Failed to connect: ${err.message}` });
+    res.status(400).json({ error: err?.message ?? "create failed" });
   }
 });
 
-// Disconnect
-router.delete("/:id", (req, res) => {
-  db.prepare("DELETE FROM mcp_servers WHERE id=? AND user_id=?").run(req.params.id, DEFAULT_USER_ID);
+router.delete("/servers/:id", (req, res) => {
+  const ok = deleteServer(req.params.id);
+  if (!ok) return res.status(404).json({ error: "not found" });
   res.json({ ok: true });
 });
 
-// Refresh tools
-router.post("/:id/refresh", async (req, res) => {
-  const server = db.prepare("SELECT * FROM mcp_servers WHERE id=? AND user_id=?").get(req.params.id, DEFAULT_USER_ID) as any;
-  if (!server) return res.status(404).json({ error: "Server not found" });
+router.post("/servers/:id/connect", async (req, res) => {
+  const result = await connectServer(req.params.id);
+  res.json(result);
+});
 
-  try {
-    const listRes = await fetch(server.url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ jsonrpc: "2.0", method: "tools/list", id: 1 }),
-    });
-    const listData = await listRes.json();
-    const tools = listData.result?.tools ?? [];
+router.post("/servers/:id/disconnect", (req, res) => {
+  disconnectServer(req.params.id);
+  res.json({ ok: true });
+});
 
-    db.prepare("UPDATE mcp_servers SET status='connected', tools_json=?, last_connected=datetime('now') WHERE id=?")
-      .run(JSON.stringify(tools.map((t: any) => t.name)), server.id);
+router.post("/servers/:id/refresh", async (req, res) => {
+  disconnectServer(req.params.id);
+  const result = await connectServer(req.params.id);
+  res.json(result);
+});
 
-    res.json({ refreshed: true, tools: tools.length });
-  } catch (err: any) {
-    db.prepare("UPDATE mcp_servers SET status='error' WHERE id=?").run(server.id);
-    res.status(500).json({ error: err.message });
-  }
+// Legacy/back-compat: /status — lists externally-connected servers & their tools.
+router.get("/status", (_req, res) => {
+  res.json({
+    external: listServers().map(s => ({
+      id: s.id, name: s.name, transport: s.transport,
+      status: s.status, tools: s.tools.map(t => t.name),
+      lastConnected: s.lastConnectedAt, lastError: s.lastError,
+    })),
+  });
 });
 
 export default router;

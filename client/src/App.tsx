@@ -19,7 +19,11 @@ import Settings from "./pages/Settings";
 import Agents from "./pages/Agents";
 import AgentInspector from "./pages/AgentInspector";
 import PortraitCeremony from "./pages/PortraitCeremony";
+import Scan from "./pages/Scan";
 import Cortex from "./pages/Cortex";
+import Approvals from "./pages/Approvals";
+import Sessions from "./pages/Sessions";
+import SessionDetail from "./pages/SessionDetail";
 import Logs from "./pages/admin/Logs";
 import Data from "./pages/admin/Data";
 import Costs from "./pages/admin/Costs";
@@ -70,10 +74,14 @@ function Router() {
             <Route path="/agents" component={Agents} />
             <Route path="/agents/:id/inspect" component={AgentInspector} />
             <Route path="/portrait" component={PortraitCeremony} />
+            <Route path="/scan" component={Scan} />
             <Route path="/memory" component={MemoryUser} />
             <Route path="/workspace" component={Workspace} />
             <Route path="/workspace/:id" component={Workspace} />
             <Route path="/graph/:id" component={NodeDetail} />
+            <Route path="/approvals" component={Approvals} />
+            <Route path="/sessions" component={Sessions} />
+            <Route path="/sessions/:id" component={SessionDetail} />
             <Route path="/settings" component={Settings} />
             <Route path="/404" component={NotFound} />
             <Route component={NotFound} />

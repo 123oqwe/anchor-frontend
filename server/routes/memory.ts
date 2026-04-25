@@ -42,4 +42,24 @@ router.delete("/:id", (req, res) => {
   res.json({ ok: true });
 });
 
+// ── Memory arbitration queue (Phase C) ─────────────────────────────────
+router.get("/arbitrations", async (_req, res) => {
+  const { listOpenArbitrations } = await import("../memory/lifecycle.js");
+  res.json({ arbitrations: listOpenArbitrations(50) });
+});
+
+router.post("/arbitrations/:id/resolve", async (req, res) => {
+  const { resolveArbitration } = await import("../memory/lifecycle.js");
+  const resolution = req.body?.resolution;
+  if (!["keep_left", "keep_right", "keep_both", "custom"].includes(resolution)) {
+    return res.status(400).json({ error: "resolution must be keep_left|keep_right|keep_both|custom" });
+  }
+  const ok = resolveArbitration(req.params.id, resolution, {
+    customMemory: req.body?.customMemory,
+    note: req.body?.note,
+  });
+  if (!ok) return res.status(404).json({ error: "arbitration not found or already resolved" });
+  res.json({ ok: true });
+});
+
 export default router;

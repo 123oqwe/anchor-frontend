@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Type-check + Invariants + Smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # CI has no .env. Tests + invariants don't actually hit external APIs,
+      # but the compute layer refuses to boot without at least one provider
+      # key in scope. A dummy unblocks all structural / smoke checks.
+      - name: Seed dummy .env
+        run: |
+          cat > .env <<'EOF'
+          ANTHROPIC_API_KEY=sk-ant-dummy-ci-no-network
+          PORT=3099
+          NODE_ENV=test
+          EOF
+
+      - name: TypeScript
+        run: pnpm run check
+
+      - name: Invariants
+        run: pnpm run eval:invariants
+
+      - name: Scanner-events smoke
+        run: pnpm run smoke:events
+
+      - name: Sync smoke (boots in-process server)
+        run: |
+          PORT=3099 pnpm exec tsx --env-file=.env server/index.ts > /tmp/anchor-ci.log 2>&1 &
+          SERVER_PID=$!
+          for i in {1..30}; do
+            if curl -sf http://localhost:3099/api/health > /dev/null 2>&1; then
+              echo "Server up (pid=$SERVER_PID)"
+              break
+            fi
+            if ! kill -0 $SERVER_PID 2>/dev/null; then
+              echo "Server died early — log:"
+              cat /tmp/anchor-ci.log
+              exit 1
+            fi
+            sleep 1
+          done
+          set +e
+          pnpm run smoke:sync
+          STATUS=$?
+          kill $SERVER_PID 2>/dev/null
+          wait $SERVER_PID 2>/dev/null
+          if [ $STATUS -ne 0 ]; then
+            echo "Smoke failed — last 50 lines of server log:"
+            tail -n 50 /tmp/anchor-ci.log
+            exit $STATUS
+          fi
+
+      - name: Build
+        run: pnpm run build

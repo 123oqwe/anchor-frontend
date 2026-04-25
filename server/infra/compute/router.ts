@@ -79,6 +79,7 @@ export const TASK_ROUTES: Record<string, TaskRoute> = {
   twin_result_learning:  { capability: "text",       tier: "cheap" },
   morning_digest:        { capability: "text",       tier: "cheap" },
   weekly_reflection:     { capability: "text",       tier: "cheap" },
+  summarize:             { capability: "text",       tier: "cheap" },  // long-conversation auto-compression
   deep_reasoning:        { capability: "reasoning",  tier: "frontier" },
 
   // Media tasks

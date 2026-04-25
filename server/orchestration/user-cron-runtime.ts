@@ -12,6 +12,7 @@
 import cron, { type ScheduledTask } from "node-cron";
 import { db, DEFAULT_USER_ID, logExecution } from "../infra/storage/db.js";
 import { enqueueJob } from "./task-brain.js";
+import { parseCronConfig, shouldCronFire, recordCronFireInVitality } from "../cognition/agent-config.js";
 
 interface UserCronRow {
   id: string;
@@ -20,6 +21,7 @@ interface UserCronRow {
   action_type: string;
   action_config: string;
   enabled: number;
+  config_json?: string;
 }
 
 const scheduled = new Map<string, { task: ScheduledTask; pattern: string; actionType: string }>();
@@ -41,7 +43,7 @@ function refreshFromDb(): void {
   let rows: UserCronRow[];
   try {
     rows = db.prepare(
-      "SELECT id, name, cron_pattern, action_type, action_config, enabled FROM user_crons WHERE user_id=? AND enabled=1"
+      "SELECT id, name, cron_pattern, action_type, action_config, enabled, config_json FROM user_crons WHERE user_id=? AND enabled=1"
     ).all(DEFAULT_USER_ID) as UserCronRow[];
   } catch (err: any) {
     console.error("[UserCron] DB read failed:", err.message);
@@ -83,6 +85,30 @@ function refreshFromDb(): void {
 function fireCron(row: UserCronRow): void {
   let cfg: any = {};
   try { cfg = JSON.parse(row.action_config ?? "{}"); } catch {}
+
+  // Pre-fire gates: snooze + conditions. The cron's structured config (Phase 1)
+  // can declare both. If snoozed → silently skip. If conditions fail → log
+  // *why* but don't enqueue.
+  // Context for conditions: minimal but extensible — currently exposes user_state
+  // and current time. Add more fields here as conditions reference them.
+  const cronConfig = parseCronConfig(row.config_json);
+  const userState = (() => {
+    try {
+      return db.prepare("SELECT energy, focus, stress FROM user_state WHERE user_id=?").get(DEFAULT_USER_ID) as any;
+    } catch { return {}; }
+  })();
+  const context = {
+    user_state: userState ?? {},
+    now: new Date().toISOString(),
+    hour: new Date().getHours(),
+    day_of_week: new Date().getDay(),
+  };
+  const gate = shouldCronFire(cronConfig, context);
+  if (!gate.fire) {
+    logExecution(`Cron: ${row.name}`, `Skipped: ${gate.reason}`, "skipped");
+    return;
+  }
+
   try {
     const jobId = enqueueJob({
       source: "cron",
@@ -92,8 +118,21 @@ function fireCron(row: UserCronRow): void {
       name: row.name,
     });
     logExecution(`Cron: ${row.name}`, `Enqueued as job ${jobId} (${row.action_type})`);
+
+    // Vitality tick: best-effort. Persisting the updated config keeps
+    // last_fired_at + fire_count visible to user via GET /api/crons.
+    try {
+      const updated = recordCronFireInVitality(cronConfig, { success: true });
+      db.prepare("UPDATE user_crons SET config_json=? WHERE id=?")
+        .run(JSON.stringify(updated), row.id);
+    } catch {}
   } catch (err: any) {
     logExecution(`Cron: ${row.name}`, `Enqueue failed: ${err.message}`, "failed");
+    try {
+      const updated = recordCronFireInVitality(cronConfig, { success: false, error: err?.message });
+      db.prepare("UPDATE user_crons SET config_json=? WHERE id=?")
+        .run(JSON.stringify(updated), row.id);
+    } catch {}
   }
 }
 

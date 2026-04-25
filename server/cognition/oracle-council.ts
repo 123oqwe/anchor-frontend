@@ -24,9 +24,22 @@
  */
 import { nanoid } from "nanoid";
 import { db, DEFAULT_USER_ID } from "../infra/storage/db.js";
-import { text } from "../infra/compute/index.js";
+import { object } from "../infra/compute/index.js";
 import { bus } from "../orchestration/bus.js";
 import { getLatestProfile, inferProfile, type InferredProfile } from "./profile-inference.js";
+import { computeRhythmFingerprint, rhythmToText } from "../graph/timeline.js";
+import { z } from "zod";
+
+const OracleNarrativeSchema = z.object({
+  narrative: z.string(),
+  questions: z.array(z.string()).default([]),
+});
+
+const CompassSchema = z.object({
+  headline: z.string(),
+  paragraph: z.string(),
+  three_questions: z.array(z.string()).default([]),
+});
 
 // ── Schema ────────────────────────────────────────────────────────────────
 
@@ -86,7 +99,7 @@ const ORACLES: OracleDef[] = [
     displayName: "Historian",
     icon: "📜",
     lens:
-      "You are the Historian Oracle. You read the user's tool presence, file archive, and language/timezone fingerprint as ARTIFACTS of a longer biographical arc. Your question is never 'what is the user doing now' — it is 'what chapter of their life is this, and what chapter is ending or starting?'. You notice which tools are 2024-2025 new (a new chapter) vs pre-2020 loyal (continuity), what Desktop files hint at a present transition (e.g. finance curriculum = skill pivot), what language/cultural signals trace a longer migration story. You write warmly but precisely. You do not flatter. You notice what's ending as much as what's beginning.",
+      "You are the Historian Oracle. You read the user's tool presence, file archive, and language/timezone fingerprint as ARTIFACTS of a longer biographical arc. Your question is never 'what is the user doing now' — it is 'what chapter of their life is this, and what chapter is ending or starting?'. You notice which tools are 2024-2025 new (a new chapter) vs pre-2020 loyal (continuity), what Desktop files hint at a present transition (e.g. finance curriculum = skill pivot), what language/cultural signals trace a longer migration story. SPECIFICALLY cite evidence from: active_interests.evidence (look for repo names, vault names, curriculum filenames — these are TIMESTAMPED chapter markers); cohort_tags (e.g. '2024-ai-native' signals entry year); cultural_context.nuance (migration/bicultural arc). If the profile slice names a specific artifact (repo, vault, library size), use that exact name in your narrative. You write warmly but precisely. You do not flatter. You notice what's ending as much as what's beginning.",
     profileSlice: (p) => {
       const parts: string[] = [];
       parts.push(`Identity: ${p.identity.primary_role}; secondary: ${p.identity.secondary_roles.join(", ")}; cohort: ${p.identity.cohort_tags.join(", ")}`);
@@ -101,7 +114,7 @@ const ORACLES: OracleDef[] = [
     displayName: "Cartographer",
     icon: "🗺️",
     lens:
-      "You are the Cartographer Oracle. You map the user's relationship topology: who is close, who is drifting, who is transactional, who is missing. You read the key_relationships list, communication-app presence, calendar collaborator density. You look for ASYMMETRIES: who initiates vs responds, who is present in messages but absent from calendar (or vice versa), which cultural/language circles the user straddles. You name specific relationship types rather than generic 'friends'. You notice the SIZE of the close-in circle vs wider network. You flag when someone's hypothesis-only role might be very wrong and invites the user to correct.",
+      "You are the Cartographer Oracle. You map the user's relationship topology: who is close, who is drifting, who is transactional, who is missing. You read key_relationships (built from messagesUnified top contacts + emailUnified top senders), communication-app presence, calendar collaborator density. CITE SPECIFIC IDENTIFIERS from key_relationships[].identifier — a name, handle, or email fragment — do not paraphrase them away. You look for ASYMMETRIES: who initiates vs responds, who is present in messages but absent from calendar, which chat-app (WeChat vs iMessage vs Telegram, per cultural_context.nuance) holds which circle — a WeChat-heavy + iMessage contact split is a cross-border relationship topology, NAME it. You notice the SIZE of the close-in circle vs wider network. You flag when someone's hypothesis-only role might be very wrong and invite the user to correct.",
     profileSlice: (p) => {
       const parts: string[] = [];
       parts.push(`Cultural context: ${p.cultural_context.primary_region}, ${p.cultural_context.fluency}; ${p.cultural_context.nuance}`);
@@ -115,7 +128,7 @@ const ORACLES: OracleDef[] = [
     displayName: "Purpose",
     icon: "🎯",
     lens:
-      "You are the Purpose Oracle. You compare what the user SAYS they're doing (their primary_role, their active_interests) against what their ARTIFACTS show (git projects, desktop files, tool choices, running processes, time allocation). You find the difference between STATED purpose and BEHAVED purpose. You reframe what they're actually building/pursuing using a word or concept they themselves may not have used. You are blunt but respectful. You never preach about priorities — you illuminate the gap and let them answer it.",
+      "You are the Purpose Oracle. You compare what the user SAYS they're doing (their primary_role) against what their ARTIFACTS show (git projects, desktop files, tool choices, running processes, time allocation). You find the difference between STATED purpose and BEHAVED purpose. SPECIFICALLY: look at active_interests[].evidence for concrete artifact names (primary repo from codeUnified, a curriculum filename, a vault name) — these are the BEHAVED purpose. If active_interests lists multiple competing areas (e.g. 'AI systems' + 'DJing' + 'finance curriculum'), name the competing pulls directly and ask which is the true north. Reframe what they're actually building using a word or concept they themselves may not have used. You are blunt but respectful. You never preach about priorities — you illuminate the gap and let them answer it.",
     profileSlice: (p) => {
       const parts: string[] = [];
       parts.push(`Primary role: ${p.identity.primary_role}`);
@@ -131,7 +144,7 @@ const ORACLES: OracleDef[] = [
     displayName: "Shadow",
     icon: "🌗",
     lens:
-      "You are the Shadow Oracle. You surface what the user is AVOIDING or NOT SEEING. You read absence patterns (no note app, no task manager, no social media, no calendar investment), privacy/security tooling that goes beyond casual interest, projects mentioned in files that haven't been touched recently, and explicit tensions. You name anxieties or imposter-syndromes if evidence is strong. You are gentle but honest — you do not shame, but you also do not protect. If the evidence is thin, you say 'I might be wrong here' and ask a question instead.",
+      "You are the Shadow Oracle. You surface what the user is AVOIDING or NOT SEEING. You read ABSENCE patterns — these often appear in tensions[] or unknowns[]: no task manager adopted (tasksUnified.signals), scattered markdown without a consolidation habit (notesUnified.scatteredMarkdown), zero calendar locations (locationUnified), dormant phase on active_interests (a project named in evidence but not touched recently). Privacy/security tooling beyond casual interest is also a shadow. You name anxieties or imposter-syndromes if evidence is strong. If active_interests includes 'DJing' or 'finance' alongside a demanding primary_role, the shadow may be: the hobby is the escape from the thing that matters most. You are gentle but honest — you do not shame, but you also do not protect. If the evidence is thin, you say 'I might be wrong here' and ask a question instead.",
     profileSlice: (p) => {
       const parts: string[] = [];
       parts.push(`Identity: ${p.identity.primary_role}; secondary: ${p.identity.secondary_roles.join(", ")}`);
@@ -146,11 +159,17 @@ const ORACLES: OracleDef[] = [
     displayName: "Tempo",
     icon: "⏱️",
     lens:
-      "You are the Tempo Oracle. You read the user's work rhythm — when they are sharp, when they are scattered, what breaks their flow, whether their stated schedule matches their actual peaks. You use schedule_type, peak_day/hour, meeting_density, and specific time patterns. You notice ritual vs. chaotic rhythms. You flag sustainability vs. overload. You do not prescribe wellness — you describe the rhythm and ask whether it serves the person.",
+      "You are the Tempo Oracle. You read the user's work rhythm — when they are sharp, when they are scattered, what breaks their flow, whether their stated schedule matches their actual peaks. You now have access to TWO tempo sources: the profile's pre-aggregated work_style AND a live 'Rhythm (last 180d)' fingerprint computed from raw per-event timestamps (commits + meetings). CITE THE LIVE RHYTHM — the peak hour, peak day of week, top-3 days, active-day ratio, and longest commit streak are from actual timestamped events, not generic descriptors. If the live rhythm CONFIRMS the profile's claim (e.g. profile says late-night, timeline confirms 23:00 peak), say so. If it CONTRADICTS (profile says morning-person, commits cluster at 22:00), flag the contradiction. If active_interests includes DJing/music (Rekordbox, NetEase), that is a PARALLEL rhythm — name both. You flag ritual vs. chaotic rhythms, sustainability vs. overload. You do not prescribe wellness — you describe the rhythm and ask whether it serves the person.",
     profileSlice: (p) => {
       const parts: string[] = [];
-      parts.push(`Work style: schedule=${p.work_style.schedule_type}, meetings=${p.work_style.meeting_density}, peak=${p.work_style.peak_day ?? "?"} ${p.work_style.peak_hour ?? "?"}:00`);
+      parts.push(`Work style (profile, pre-aggregated): schedule=${p.work_style.schedule_type}, meetings=${p.work_style.meeting_density}, peak=${p.work_style.peak_day ?? "?"} ${p.work_style.peak_hour ?? "?"}:00`);
       parts.push(`Focus pattern narrative: ${p.work_style.focus_pattern}`);
+      // Live rhythm from timeline — actual event timestamps, not summary.
+      // Falls back gracefully when timeline has no data yet (first run).
+      try {
+        const rhythm = computeRhythmFingerprint({ windowDays: 180 });
+        parts.push(rhythmToText(rhythm));
+      } catch (err) { /* timeline query failed — profile stats still present */ }
       parts.push(`Active interests (running in parallel): ${p.active_interests.map(i => i.area).join(" | ")}`);
       parts.push(`Openings: ${(p.openings_for_oracles.tempo ?? []).join(" | ")}`);
       return parts.join("\n");
@@ -172,6 +191,7 @@ You will output ONLY a JSON object with this shape (no preamble, no markdown):
 
 CONSTRAINTS:
 - Reference concrete evidence from the profile (names, counts, filenames, patterns) — do not write generically
+- MUST cite at least ONE specific identifier from the profile slice (a repo name, contact handle, vault name, library size, peak hour, cohort tag) — a narrative with zero concrete citations is a failed output
 - If confidence is low, say so explicitly; DO NOT fabricate certainty
 - Use the "Openings" line from the profile slice as your sharpest entry point
 - Do NOT repeat what other oracles will say — stay in YOUR lens`;
@@ -182,28 +202,23 @@ async function runOracle(def: OracleDef, profile: InferredProfile): Promise<Orac
   const system = buildOraclePrompt(def);
   const user = `Here is the profile slice most relevant to your lens:\n\n${def.profileSlice(profile)}\n\nProduce your JSON output now.`;
 
-  const raw = await text({
-    task: "decision",
-    system,
-    messages: [{ role: "user", content: user }],
-    maxTokens: 1200,
-    agentName: `Oracle:${def.displayName}`,
-  });
-
-  const stripped = raw.replace(/```json\s*/g, "").replace(/```/g, "").trim();
   let narrative = "";
   let questions: string[] = [];
   try {
-    const m = stripped.match(/\{[\s\S]*\}/);
-    if (m) {
-      const parsed = JSON.parse(m[0]);
-      narrative = typeof parsed.narrative === "string" ? parsed.narrative.trim() : "";
-      questions = Array.isArray(parsed.questions) ? parsed.questions.filter((q: any) => typeof q === "string") : [];
-    }
-  } catch {}
-  if (!narrative) {
-    narrative = stripped.slice(0, 1500) || "(Oracle returned no narrative)";
+    const parsed = await object({
+      task: "decision",
+      system,
+      messages: [{ role: "user", content: user }],
+      schema: OracleNarrativeSchema,
+      maxTokens: 1200,
+      agentName: `Oracle:${def.displayName}`,
+    });
+    narrative = parsed.narrative.trim();
+    questions = parsed.questions;
+  } catch (err: any) {
+    console.error(`[Oracle:${def.displayName}] structured-output failed:`, err.message);
   }
+  if (!narrative) narrative = "(Oracle returned no narrative)";
 
   return {
     oracle: def.id,
@@ -245,31 +260,28 @@ CONSTRAINTS:
     "Produce your compass JSON now.",
   ].join("\n");
 
-  const raw = await text({
-    task: "decision",
-    system,
-    messages: [{ role: "user", content: user }],
-    maxTokens: 1000,
-    agentName: "Oracle:Compass",
-  });
-
-  const stripped = raw.replace(/```json\s*/g, "").replace(/```/g, "").trim();
   try {
-    const m = stripped.match(/\{[\s\S]*\}/);
-    if (m) {
-      const parsed = JSON.parse(m[0]);
-      return {
-        headline: String(parsed.headline ?? "").trim() || "Portrait ready (headline parse failed).",
-        paragraph: String(parsed.paragraph ?? "").trim() || "",
-        three_questions: Array.isArray(parsed.three_questions) ? parsed.three_questions.filter((q: any) => typeof q === "string").slice(0, 3) : [],
-      };
-    }
-  } catch {}
-  return {
-    headline: "Portrait generated (Compass output could not be parsed strictly).",
-    paragraph: stripped.slice(0, 1500),
-    three_questions: [],
-  };
+    const parsed = await object({
+      task: "decision",
+      system,
+      messages: [{ role: "user", content: user }],
+      schema: CompassSchema,
+      maxTokens: 1000,
+      agentName: "Oracle:Compass",
+    });
+    return {
+      headline: parsed.headline.trim() || "Portrait ready (headline parse failed).",
+      paragraph: parsed.paragraph.trim(),
+      three_questions: parsed.three_questions.slice(0, 3),
+    };
+  } catch (err: any) {
+    console.error("[Oracle:Compass] structured-output failed:", err.message);
+    return {
+      headline: "Portrait generated (Compass output could not be parsed strictly).",
+      paragraph: "",
+      three_questions: [],
+    };
+  }
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────

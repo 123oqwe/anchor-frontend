@@ -27,6 +27,7 @@ import { scanCalendar } from "./calendar.js";
 import { findApp } from "./app-registry.js";
 import { getFreshAccessToken, getTokens } from "../token-store.js";
 import { DEFAULT_USER_ID } from "../../infra/storage/db.js";
+import { shadowEmit } from "../../infra/storage/scanner-events.js";
 import type { IngestionEvent } from "../types.js";
 import fs from "fs";
 import path from "path";
@@ -324,6 +325,26 @@ export async function scanAllCalendars(sinceDaysAgo = 30): Promise<{
   const merged = mergeAndDedup(appleEvents, googleEvents);
   const summary = summarizeCalendar(merged, sinceDaysAgo);
   console.log(`[CalendarUnified] apple=${appleEvents.length} google=${googleEvents.length} → unified=${merged.length}. ${summary.eventsPerWeek}/wk, peak ${summary.peakDay} ${summary.peakHour}:00`);
+
+  shadowEmit({
+    scanner: "calendar-unified",
+    source: "calendar",
+    kind: "calendar_scan_summary",
+    stableFields: { scanDay: new Date().toISOString().slice(0, 10), sinceDaysAgo },
+    payload: {
+      sinceDaysAgo,
+      appleCount: appleEvents.length,
+      googleCount: googleEvents.length,
+      unifiedCount: merged.length,
+      eventsPerWeek: summary.eventsPerWeek,
+      peakDay: summary.peakDay,
+      peakHour: summary.peakHour,
+      topAttendees: summary.topAttendees?.slice(0, 10),
+      uniqueAttendees: summary.uniqueAttendees,
+      googleOAuthAvailable: summary.googleOAuthAvailable,
+    },
+  });
+
   return { events: merged, summary };
 }
 

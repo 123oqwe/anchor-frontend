@@ -5,20 +5,41 @@ import { fileURLToPath } from "url";
 import { db, DEFAULT_USER_ID, logExecution } from "../infra/storage/db.js";
 import { nanoid } from "nanoid";
 import { text } from "../infra/compute/index.js";
-import { invalidateSnapshot, writeMemory } from "../memory/retrieval.js";
-import { runDream } from "../memory/dream.js";
+import { writeMemory } from "../memory/retrieval.js";
 import { detectDrift } from "../cognition/twin.js";
 import { checkProactiveTriggers } from "./enforcement.js";
 import { markStaleAsDecaying } from "../graph/writer.js";
 import { runIngestion } from "../integrations/pipeline.js";
-import { captureActiveWindow, updateGraphFromActivity, cleanupOldCaptures } from "../integrations/local/activity-monitor.js";
-import { runPersonalEvolution } from "../cognition/evolution.js";
-import { analyzeExecutionTraces } from "../cognition/gepa.js";
+import { captureActiveWindow, updateGraphFromActivity } from "../integrations/local/activity-monitor.js";
 import { runSystemEvolution } from "./system-evolution.js";
-import { runDiagnostic } from "../cognition/diagnostic.js";
+import { isCronSnoozed, isCronDisabled } from "../cognition/system-cron-overrides.js";
+
+/**
+ * Wrap a cron callback with the user-snooze + user-disabled gate. Phase 2
+ * Mode C — every system cron gets the same lifecycle controls (snooze for
+ * vacation, fully disable for "stop bothering me forever") without duplicating
+ * the gate code at every site. Sync callbacks work too — `void | Promise<void>`.
+ */
+function gated(
+  cronId: string,
+  agentName: string,
+  fn: () => void | Promise<void>,
+): () => Promise<void> {
+  return async () => {
+    if (isCronSnoozed(cronId)) {
+      logExecution(agentName, `${cronId} skipped — user-snoozed`, "skipped");
+      return;
+    }
+    if (isCronDisabled(cronId)) {
+      logExecution(agentName, `${cronId} skipped — user disabled`, "skipped");
+      return;
+    }
+    await fn();
+  };
+}
 
 // ── Every day 08:00 — Morning Digest ────────────────────────────────────────
-schedule("0 8 * * *", async () => {
+schedule("0 8 * * *", gated("morning_digest", "Observation Agent", async () => {
   console.log("[Cron] Morning Digest starting...");
   try {
     const nodes = db.prepare(
@@ -45,20 +66,25 @@ schedule("0 8 * * *", async () => {
     console.error("[Cron] Morning Digest failed:", err.message);
     logExecution("Observation Agent", "Morning digest failed", "failed");
   }
-});
+}));
 
 // ── Every 6 hours — Decay Checker ───────────────────────────────────────────
-schedule("0 */6 * * *", () => {
+schedule("0 */6 * * *", gated("decay_checker", "Observation Agent", () => {
   try {
     const changed = markStaleAsDecaying(5); // 5 days
     if (changed > 0) logExecution("Observation Agent", `Decay check: ${changed} nodes marked decaying`);
   } catch (err: any) {
     console.error("[Cron] Decay Checker failed:", err.message);
   }
-});
+}));
+
+// NOTE: feedback_detectors / weekly_backup / weekly_growth_card / edge_staleness
+// removed — owned by `nightly_consolidation` and `weekly_insight` and
+// `weekly_backup` workflow DAGs in workflow-defs.ts. Keeping both fired the
+// same handler twice and risked race conditions.
 
 // ── Every Monday 09:00 — Weekly Twin Reflection ──────────────────────────────
-schedule("0 9 * * 1", async () => {
+schedule("0 9 * * 1", gated("twin_weekly_reflection", "Twin Agent", async () => {
   console.log("[Cron] Weekly Twin Reflection starting...");
   try {
     const execs = db.prepare(
@@ -91,36 +117,24 @@ schedule("0 9 * * 1", async () => {
     console.error("[Cron] Weekly reflection failed:", err.message);
     logExecution("Twin Agent", "Weekly reflection failed", "failed");
   }
-});
+}));
 
 // ── Every day 22:00 — Stale Task Detector ────────────────────────────────────
-schedule("0 22 * * *", () => {
+schedule("0 22 * * *", gated("stale_task_detector", "Workspace Agent", () => {
   try {
     const result = db.prepare("UPDATE tasks SET status='blocked' WHERE status='in-progress' AND julianday('now') - julianday(created_at) > 7").run();
     if (result.changes > 0) logExecution("Workspace Agent", `${result.changes} stale tasks marked blocked`);
   } catch (err: any) {
     console.error("[Cron] Stale Task Detector failed:", err.message);
   }
-});
+}));
 
-// ── Every day 03:00 — Dream Consolidation ────────────────────────────────────
-schedule("0 3 * * *", async () => {
-  try {
-    const stats = await runDream();
-    invalidateSnapshot(); // force memory snapshot refresh after dream
-    const total = stats.pruned + stats.merged + stats.promoted + stats.skillsCreated + stats.timeNormalized + stats.capacityRemoved;
-    if (total > 0) {
-      logExecution("Dream Engine", `Dream: p=${stats.pruned} m=${stats.merged} pro=${stats.promoted} sk=${stats.skillsCreated} t=${stats.timeNormalized} cap=${stats.capacityRemoved}`);
-    }
-    // Also cleanup old activity captures (keep 30 days)
-    try { const cleaned = cleanupOldCaptures(); if (cleaned > 0) logExecution("Dream Engine", `Cleaned ${cleaned} old activity captures`); } catch (err) { console.error("[Cron] Activity cleanup failed:", err); }
-  } catch (err: any) {
-    console.error("[Cron] Dream consolidation failed:", err.message);
-  }
-});
+// NOTE: dream cron removed — owned by `nightly_consolidation` workflow.
+// Activity-captures cleanup moved into the workflow's dream.run handler so
+// nothing is silently dropped.
 
 // ── Every 6 hours — Ingestion Pipeline (Gmail + Calendar scan) ───────────────
-schedule("0 */6 * * *", async () => {
+schedule("0 */6 * * *", gated("ingestion_pipeline", "Ingestion Pipeline", async () => {
   try {
     const result = await runIngestion(DEFAULT_USER_ID, "incremental");
     if (result && result.eventsFetched > 0) {
@@ -129,10 +143,10 @@ schedule("0 */6 * * *", async () => {
   } catch (err: any) {
     console.error("[Cron] Ingestion failed:", err.message);
   }
-});
+}));
 
 // ── Every 12 hours — Proactive Suggestion Check ─────────────────────────────
-schedule("0 */12 * * *", () => {
+schedule("0 */12 * * *", gated("proactive_check", "Orchestrator", () => {
   try {
     const trigger = checkProactiveTriggers();
     if (trigger) {
@@ -151,17 +165,17 @@ schedule("0 */12 * * *", () => {
   } catch (err: any) {
     console.error("[Cron] Proactive check failed:", err.message);
   }
-});
+}));
 
 // ── Every 5 minutes — Activity Capture ──────────────────────────────────────
-schedule("*/5 * * * *", () => {
+schedule("*/5 * * * *", gated("activity_capture", "Activity Monitor", () => {
   try {
     captureActiveWindow();
   } catch (err) { console.error("[Cron] Activity capture failed:", err); }
-});
+}));
 
 // ── Every 6 hours — Update Graph from Activity ──────────────────────────────
-schedule("30 */6 * * *", () => {
+schedule("30 */6 * * *", gated("graph_update_activity", "Activity Monitor", () => {
   try {
     const result = updateGraphFromActivity();
     if (result.updated > 0) logExecution("Activity Monitor", `Updated ${result.updated} nodes from activity data`);
@@ -171,10 +185,10 @@ schedule("30 */6 * * *", () => {
   } catch (err: any) {
     console.error("[Cron] Activity update failed:", err.message);
   }
-});
+}));
 
 // ── Every day 02:55 — SQLite Backup (before Dream Engine) ─────────────────
-schedule("55 2 * * *", () => {
+schedule("55 2 * * *", gated("sqlite_backup", "Backup", () => {
   try {
     const dbPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "infra", "anchor.db");
     const backupDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "infra", "backups");
@@ -202,38 +216,13 @@ schedule("55 2 * * *", () => {
   } catch (err: any) {
     console.error("[Cron] Backup setup failed:", err.message);
   }
-});
+}));
 
-// ── Every day 04:00 — Personal Evolution Engine ───────────────────────────
-schedule("0 4 * * *", async () => {
-  console.log("[Cron] Personal Evolution starting...");
-  try {
-    const result = await runPersonalEvolution();
-    if (result.dimensionsUpdated.length > 0) {
-      logExecution("Evolution Engine", `Evolved: ${result.dimensionsUpdated.join(", ")} (${result.signalsProcessed} signals)`);
-    }
-  } catch (err: any) {
-    console.error("[Cron] Evolution failed:", err.message);
-    logExecution("Evolution Engine", "Evolution failed", "failed");
-  }
-});
-
-// ── Every Sunday 05:00 — GEPA Execution Trace Analysis ────────────────────
-schedule("0 5 * * 0", async () => {
-  console.log("[Cron] GEPA analysis starting...");
-  try {
-    const result = await analyzeExecutionTraces(7);
-    if (result.wastePatterns.length > 0 || result.optimizations.length > 0) {
-      logExecution("GEPA Optimizer", `Weekly: ${result.wastePatterns.length} waste, ${result.optimizations.length} opts, efficiency=${result.efficiency}%`);
-    }
-  } catch (err: any) {
-    console.error("[Cron] GEPA failed:", err.message);
-    logExecution("GEPA Optimizer", "GEPA analysis failed", "failed");
-  }
-});
+// NOTE: personal_evolution + gepa_analysis removed — owned by
+// `nightly_consolidation.evolution` and `weekly_insight.gepa` workflow jobs.
 
 // ── Every Sunday 06:00 — System Evolution (model routing optimization) ────
-schedule("0 6 * * 0", async () => {
+schedule("0 6 * * 0", gated("system_evolution", "System Evolution", async () => {
   console.log("[Cron] System Evolution starting...");
   try {
     const result = await runSystemEvolution();
@@ -244,32 +233,13 @@ schedule("0 6 * * 0", async () => {
     console.error("[Cron] System Evolution failed:", err.message);
     logExecution("System Evolution", "System evolution failed", "failed");
   }
-});
+}));
 
-// ── Every Sunday 07:00 — Self-Diagnostic Agent ────────────────────────────
-schedule("0 7 * * 0", () => {
-  // Skip if user inactive > 7 days
-  const lastMsg = db.prepare("SELECT MAX(created_at) as last FROM messages WHERE user_id=? AND role='user'").get(DEFAULT_USER_ID) as any;
-  const inactiveDays = lastMsg?.last ? (Date.now() - new Date(lastMsg.last).getTime()) / 86400000 : 999;
-  if (inactiveDays > 7) {
-    console.log("[Cron] Diagnostic skipped — user inactive for " + Math.round(inactiveDays) + " days");
-    return;
-  }
-
-  console.log("[Cron] Self-Diagnostic starting...");
-  try {
-    const report = runDiagnostic();
-    const criticals = report.alerts.filter(a => a.severity === "critical").length;
-    const warnings = report.alerts.filter(a => a.severity === "warning").length;
-    logExecution("Diagnostic Agent", `Phase ${report.phase}: ${criticals}C ${warnings}W ${report.fixesApplied.length} fixes`);
-  } catch (err: any) {
-    console.error("[Cron] Diagnostic failed:", err.message);
-    logExecution("Diagnostic Agent", "Diagnostic failed", "failed");
-  }
-});
+// NOTE: self_diagnostic cron removed — owned by `nightly_consolidation.diagnostic`.
+// Inactive-user skip can be re-added inside the workflow handler if it matters.
 
 export function startCronJobs() {
   // Start first capture immediately
   try { captureActiveWindow(); } catch (err) { console.error("[Cron] Initial capture failed:", err); }
-  console.log("⏰ Cron: Activity(5min) | Digest(8am) | Decay(6h) | Twin(Mon 9am) | Tasks(10pm) | Dream(3am) | Evolution(4am) | GEPA(Sun 5am) | SysEvo(Sun 6am) | Diagnostic(Sun 7am) | Proactive(12h) | GraphUpdate(6h)");
+  console.log("⏰ Cron (legacy survivors): Activity(5min) | Digest(8am) | Decay(6h) | Twin(Mon 9am) | Tasks(10pm) | Ingest(6h) | Proactive(12h) | GraphUpdate(6h) | SqliteBackup(2:55am) | SysEvo(Sun 6am) — heavy cognitive jobs now run via workflow DAGs");
 }

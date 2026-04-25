@@ -43,7 +43,9 @@ export function scanCalendar(sinceDaysAgo = 30): IngestionEvent[] {
       end tell
     `;
 
-    const raw = execSync(`osascript -e '${script.replace(/'/g, "'\\''")}'`, {
+    // Pipe stderr to /dev/null — Calendar.app not running emits -600 to
+    // stderr on every run which noisily pollutes server logs.
+    const raw = execSync(`osascript -e '${script.replace(/'/g, "'\\''")}' 2>/dev/null`, {
       timeout: 30000,
       encoding: "utf-8",
     });

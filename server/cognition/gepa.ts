@@ -14,8 +14,9 @@
  */
 import { db, DEFAULT_USER_ID, logExecution } from "../infra/storage/db.js";
 import { nanoid } from "nanoid";
-import { text } from "../infra/compute/index.js";
+import { object } from "../infra/compute/index.js";
 import { setRouteOverride } from "../infra/compute/telemetry.js";
+import { z } from "zod";
 
 export interface TraceAnalysis {
   totalCalls: number;
@@ -125,38 +126,52 @@ export async function analyzeExecutionTraces(daysBack = 7): Promise<TraceAnalysi
   try {
     const tracesSummary = `LLM calls: ${totalCalls} (${totalTokens} tokens). Failed: ${failedCalls.length}. Tasks: ${Array.from(taskTokens.entries()).map(([t, d]) => `${t}(${d.calls}calls/${d.tokens}tok)`).join(", ")}. Waste patterns: ${wastePatterns.map(w => w.description).join("; ")}`;
 
-    const result = await text({
+    const parsed = await object({
       task: "twin_edit_learning",
-      system: `You analyze AI agent execution traces and suggest optimizations. Respond ONLY with JSON: {"optimizations": [{"target": "task_name", "suggestion": "what to change", "estimatedSaving": "30% fewer tokens", "autoApplicable": true}]}`,
+      system: "You analyze AI agent execution traces and suggest optimizations.",
       messages: [{ role: "user", content: tracesSummary }],
+      schema: z.object({
+        optimizations: z.array(z.object({
+          target: z.string(),
+          suggestion: z.string(),
+          estimatedSaving: z.string(),
+          autoApplicable: z.boolean(),
+        })),
+      }),
       maxTokens: 300,
     });
-
-    const parsed = JSON.parse(result.match(/\{[\s\S]*\}/)?.[0] ?? "{}");
-    if (Array.isArray(parsed.optimizations)) {
-      optimizations = parsed.optimizations;
-    }
+    optimizations = parsed.optimizations;
   } catch (err) { console.error("[GEPA] Analysis failed:", err); }
 
   const efficiency = Math.max(0, 100 - wastePatterns.length * 15 - Math.round(failedCalls.length / totalCalls * 100));
 
-  // Auto-apply optimizations that are safe (route overrides)
-  let applied = 0;
+  // Generate mutation proposals — they'll be gated through Phase B eval
+  // before any deploy. GEPA no longer auto-applies; the proposals pipeline
+  // decides.
+  let proposed = 0;
+  const { proposeMutation } = await import("./proposals.js");
+  const { getRouteOverride } = await import("../infra/compute/telemetry.js");
   for (const opt of optimizations) {
-    if (opt.autoApplicable && opt.target) {
-      // If suggestion mentions using a cheaper/faster model, apply route override
-      const suggLower = opt.suggestion.toLowerCase();
-      if (suggLower.includes("cheaper") || suggLower.includes("fast") || suggLower.includes("haiku") || suggLower.includes("smaller")) {
-        // Downgrade to cheap tier for this task
-        setRouteOverride(opt.target, "claude-haiku-4-5-20251001");
-        applied++;
-        console.log(`[GEPA] Auto-applied: ${opt.target} → haiku (${opt.estimatedSaving})`);
-      }
+    if (!opt.autoApplicable || !opt.target) continue;
+    const suggLower = opt.suggestion.toLowerCase();
+    if (suggLower.includes("cheaper") || suggLower.includes("fast") || suggLower.includes("haiku") || suggLower.includes("smaller")) {
+      const currentOverride = getRouteOverride(opt.target);
+      const afterModel = "claude-haiku-4-5-20251001";
+      // Don't re-propose if already at the target
+      if (currentOverride === afterModel) continue;
+      proposeMutation({
+        source: "gepa",
+        kind: "route_override",
+        target: opt.target,
+        before: currentOverride,
+        after: afterModel,
+        rationale: `${opt.suggestion} (est. saving: ${opt.estimatedSaving})`,
+      });
+      proposed++;
     }
   }
 
-  // Log the analysis
-  logExecution("GEPA Optimizer", `Analyzed ${totalCalls} calls: ${wastePatterns.length} waste, ${optimizations.length} opts, ${applied} auto-applied`);
+  logExecution("GEPA Optimizer", `Analyzed ${totalCalls} calls: ${wastePatterns.length} waste, ${optimizations.length} opts, ${proposed} proposals generated`);
 
   return { totalCalls, totalTokens, wastePatterns, optimizations, efficiency };
 }

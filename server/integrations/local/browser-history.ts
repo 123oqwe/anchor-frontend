@@ -9,6 +9,7 @@ import path from "path";
 import os from "os";
 import Database from "better-sqlite3";
 import type { IngestionEvent } from "../types.js";
+import { shadowEmit } from "../../infra/storage/scanner-events.js";
 
 const HOME = os.homedir();
 
@@ -187,5 +188,35 @@ export function scanBrowserHistory(sinceDaysAgo = 30): IngestionEvent[] {
   }
 
   console.log(`[LocalScan] Browser: ${allEvents.length} URLs from ${profiles.map(p => p.name).join(", ")}`);
+
+  // Shadow-emit one summary event per scan run into the hash-chained log so
+  // sync bundles include browser-history evidence. Day-bucket dedup means
+  // multiple scans the same day collapse to one event.
+  const scanDay = new Date().toISOString().slice(0, 10);
+  const topDomains = (() => {
+    const counts = new Map<string, number>();
+    for (const e of allEvents) {
+      const url = (e.metadata as any)?.url ?? "";
+      try {
+        const host = new URL(url).hostname.replace("www.", "");
+        counts.set(host, (counts.get(host) ?? 0) + ((e.metadata as any)?.visits ?? 1));
+      } catch {}
+    }
+    return Array.from(counts.entries()).sort((a, b) => b[1] - a[1]).slice(0, 20)
+      .map(([domain, visits]) => ({ domain, visits }));
+  })();
+  shadowEmit({
+    scanner: "browser-history",
+    source: "safari",
+    kind: "browser_scan_summary",
+    stableFields: { scanDay, sinceDaysAgo },
+    payload: {
+      urlCount: allEvents.length,
+      browsers: profiles.map(p => p.name),
+      sinceDaysAgo,
+      topDomains,
+    },
+  });
+
   return allEvents;
 }

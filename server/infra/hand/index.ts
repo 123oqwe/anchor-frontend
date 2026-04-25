@@ -150,15 +150,6 @@ function registerBridgeTools(): void {
   });
 }
 
-// Legacy export kept so old callers don't crash; the browser logic lives in bridge providers now.
-export function isBrowserEnabled(): boolean {
-  return true;  // always enabled via bridges (CLI/MCP providers self-gate via healthCheck)
-}
-
-export async function closeBrowser(): Promise<void> {
-  // Handled by bridge MCP provider lifecycle on SIGTERM
-}
-
 export function getHandStatus() {
   const caps = getCapabilities();
   const provs = getProviders();

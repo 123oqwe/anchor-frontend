@@ -4,6 +4,7 @@
  */
 import { execSync } from "child_process";
 import type { IngestionEvent } from "../types.js";
+import { shadowEmit } from "../../infra/storage/scanner-events.js";
 
 export function scanContacts(): IngestionEvent[] {
   try {
@@ -65,6 +66,23 @@ export function scanContacts(): IngestionEvent[] {
     }
 
     console.log(`[LocalScan] Contacts: ${events.length} people`);
+
+    const scanDay = new Date().toISOString().slice(0, 10);
+    const withEmail = events.filter(e => (e.metadata as any)?.email).length;
+    const withOrg = events.filter(e => (e.metadata as any)?.org).length;
+    shadowEmit({
+      scanner: "apple-contacts",
+      source: "contacts",
+      kind: "contacts_scan_summary",
+      stableFields: { scanDay },
+      payload: {
+        peopleCount: events.length,
+        withEmail,
+        withOrg,
+        topNames: events.slice(0, 30).map(e => (e.metadata as any)?.name).filter(Boolean),
+      },
+    });
+
     return events;
   } catch (err: any) {
     if (err.message?.includes("not allowed") || err.message?.includes("-1743")) {

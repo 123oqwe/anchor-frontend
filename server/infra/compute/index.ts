@@ -11,7 +11,8 @@
  * Fallback: if first-choice model fails, tries the next candidate.
  */
 
-import { generateText, streamText as aiStreamText, stepCountIs, type ModelMessage, type ToolSet, type GenerateTextResult } from "ai";
+import { generateText, generateObject, streamText as aiStreamText, stepCountIs, type ModelMessage, type ToolSet, type GenerateTextResult } from "ai";
+import type { z } from "zod";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
@@ -231,6 +232,48 @@ export async function textWithTools<T extends ToolSet>(opts: {
       responsePreview: result.text ?? "(tool-use response)",
     };
   });
+}
+
+/**
+ * Structured output — LLM call with zod-validated JSON response.
+ *
+ * Replaces the "ask LLM for JSON, regex-extract, JSON.parse, hope" pattern
+ * with Vercel AI SDK's generateObject which:
+ *   - Constrains the model via tool calls / json schema mode
+ *   - Auto-retries when output doesn't match the schema
+ *   - Returns a typed object directly (no parse step needed)
+ *
+ * Same task-based routing + fallback machinery as text(). If the first
+ * candidate model can't satisfy the schema, the fallback chain takes over.
+ */
+export async function object<T>(opts: {
+  task: string;
+  system: string;
+  messages: { role: "user" | "assistant"; content: string }[];
+  schema: z.ZodType<T>;
+  maxTokens?: number;
+  runId?: string;
+  agentName?: string;
+}): Promise<T> {
+  const lastMsg = opts.messages[opts.messages.length - 1]?.content ?? "";
+  return withFallback<T>(opts.task, async (model) => {
+    const instance = createModelInstance(model);
+    const result = await generateObject({
+      model: instance,
+      system: opts.system,
+      messages: opts.messages as ModelMessage[],
+      schema: opts.schema,
+      maxOutputTokens: opts.maxTokens ?? 1024,
+    });
+    return {
+      value: result.object,
+      usage: {
+        inputTokens: (result.usage as any)?.inputTokens ?? (result.usage as any)?.promptTokens,
+        outputTokens: (result.usage as any)?.outputTokens ?? (result.usage as any)?.completionTokens,
+      },
+      responsePreview: JSON.stringify(result.object).slice(0, 300),
+    };
+  }, { inputPreview: lastMsg, runId: opts.runId, agentName: opts.agentName });
 }
 
 /**

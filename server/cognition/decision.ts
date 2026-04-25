@@ -12,7 +12,9 @@
  * Pure cognition — no side effects.
  */
 import { createHash } from "crypto";
-import { text, textStream } from "../infra/compute/index.js";
+import { text, textStream, object } from "../infra/compute/index.js";
+import { z } from "zod";
+import { pickVariant } from "../orchestration/experiment-runner.js";
 import { db, DEFAULT_USER_ID } from "../infra/storage/db.js";
 import { serializeForPrompt as graphPrompt, serializeStateForPrompt, serializeEdgesForPrompt, getNodesByType } from "../graph/reader.js";
 import { serializeForPrompt as memoryPrompt, serializeTwinForPrompt } from "../memory/retrieval.js";
@@ -175,12 +177,21 @@ OUTPUT FORMAT — For actionable requests, respond with JSON (no markdown fences
 
 For conversational questions, respond with plain text (2-3 sentences, direct, personal). Still include why-this-now thinking internally.`;
 
-function buildSystemPrompt(userMessage: string): string {
-  const base = DECISION_SYSTEM_PROMPT
+async function buildSystemPrompt(userMessage: string, contextRef?: string): Promise<string> {
+  // Sprint A — #7: prompt experiment override. If a running experiment
+  // exists for "decision.system_prompt", use that variant instead of the
+  // hardcoded template. No experiment → identical to before.
+  const variant = pickVariant({
+    key: "decision.system_prompt",
+    fallback: DECISION_SYSTEM_PROMPT,
+    contextRef,
+  });
+
+  const base = variant.value
     .replace("{STATE}", serializeStateForPrompt())
     .replace("{GRAPH}", graphPrompt())
     .replace("{EDGES}", serializeEdgesForPrompt())
-    .replace("{MEMORY}", memoryPrompt(userMessage))
+    .replace("{MEMORY}", await memoryPrompt(userMessage))
     .replace("{TWIN}", serializeTwinForPrompt())
     .replace("{CONSTITUTION}", buildValueConstitution());
 
@@ -215,7 +226,8 @@ function buildSystemPrompt(userMessage: string): string {
 /** Run the Decision Agent 5-stage pipeline. */
 export async function decide(
   message: string,
-  history: { role: "user" | "assistant"; content: string }[]
+  history: { role: "user" | "assistant"; content: string }[],
+  opts?: { contextRef?: string }   // Sprint A — #7: enables A/B outcome attribution
 ): Promise<DecisionResult> {
   // Cache check: return cached result for identical requests
   const cacheKey = getCacheKey(message, history);
@@ -271,7 +283,7 @@ export async function decide(
     return skillResult;
   }
 
-  const system = buildSystemPrompt(message);
+  const system = await buildSystemPrompt(message, opts?.contextRef);
 
   const raw = await text({
     task: "decision",
@@ -351,7 +363,7 @@ export async function decide(
     });
     if (shouldSwarm) {
       console.log("[Decision Agent] Escalating to Swarm debate...");
-      const swarmResult = await runSwarm(message, graphPrompt(), memoryPrompt(message), serializeTwinForPrompt());
+      const swarmResult = await runSwarm(message, graphPrompt(), await memoryPrompt(message), serializeTwinForPrompt());
       // Merge swarm result into packet
       if (swarmResult.candidatePlans.length > 0) {
         const plan = swarmResult.candidatePlans.find(p => p.recommended) ?? swarmResult.candidatePlans[0];
@@ -384,7 +396,7 @@ export async function decide(
 
 async function verifyTrajectoryConfidence(packet: DecisionPacket, userMessage: string): Promise<void> {
   try {
-    const verifierResult = await text({
+    const parsed = await object({
       task: "twin_edit_learning",  // cheap model
       system: `You are an independent confidence calibrator. Evaluate whether this decision plan is well-reasoned.
 
@@ -400,29 +412,24 @@ Original confidence: ${packet.confidenceScore}
 Evaluate:
 1. Is the reasoning sound given the information?
 2. Are there blind spots the plan missed?
-3. Is the confidence level appropriate?
-
-Respond ONLY with JSON: {"verified_confidence": 0.0-1.0, "blind_spots": ["any missed issues"], "calibration_note": "brief note"}`,
+3. Is the confidence level appropriate?`,
       messages: [{ role: "user", content: "Verify this decision trajectory." }],
+      schema: z.object({
+        verified_confidence: z.number().min(0).max(1),
+        blind_spots: z.array(z.string()).default([]),
+        calibration_note: z.string().default(""),
+      }),
       maxTokens: 200,
     });
 
-    const stripped = verifierResult.replace(/```json\s*/g, "").replace(/```/g, "");
-    const parsed = JSON.parse(stripped.match(/\{[\s\S]*\}/)?.[0] ?? "{}");
-
-    if (parsed.verified_confidence !== undefined) {
-      const gap = Math.abs(packet.confidenceScore - parsed.verified_confidence);
-      if (gap > 0.3) {
-        packet.conflictFlags.push(`LOW_CALIBRATION: Decision confidence ${packet.confidenceScore.toFixed(2)} but verifier says ${parsed.verified_confidence.toFixed(2)} (gap: ${gap.toFixed(2)})`);
-        // Adjust to average
-        packet.confidenceScore = (packet.confidenceScore + parsed.verified_confidence) / 2;
-        console.log(`[Decision Agent] Confidence recalibrated: ${packet.confidenceScore.toFixed(2)} (verifier gap: ${gap.toFixed(2)})`);
-      }
-      if (parsed.blind_spots?.length > 0) {
-        for (const bs of parsed.blind_spots) {
-          if (bs && bs.length > 5) packet.conflictFlags.push(`BLIND_SPOT: ${bs}`);
-        }
-      }
+    const gap = Math.abs(packet.confidenceScore - parsed.verified_confidence);
+    if (gap > 0.3) {
+      packet.conflictFlags.push(`LOW_CALIBRATION: Decision confidence ${packet.confidenceScore.toFixed(2)} but verifier says ${parsed.verified_confidence.toFixed(2)} (gap: ${gap.toFixed(2)})`);
+      packet.confidenceScore = (packet.confidenceScore + parsed.verified_confidence) / 2;
+      console.log(`[Decision Agent] Confidence recalibrated: ${packet.confidenceScore.toFixed(2)} (verifier gap: ${gap.toFixed(2)})`);
+    }
+    for (const bs of parsed.blind_spots) {
+      if (bs && bs.length > 5) packet.conflictFlags.push(`BLIND_SPOT: ${bs}`);
     }
   } catch (err: any) {
     // Verifier failure is non-fatal — just log
@@ -498,17 +505,84 @@ function detectFailures(packet: DecisionPacket, userMessage: string): void {
 
 // ── Streaming Decision — for SSE responses ─────────────────────────────────
 
+/**
+ * Approximate tokens by character count: ~4 chars per token for mixed content.
+ * Cheap, stable, doesn't require a tokenizer dependency.
+ */
+function approxTokens(messages: { content: string }[]): number {
+  let chars = 0;
+  for (const m of messages) chars += m.content.length;
+  return Math.ceil(chars / 4);
+}
+
+/**
+ * Compress the older half of a long conversation into a single summary turn,
+ * preserving the most recent half verbatim. Triggers when the rolling
+ * conversation crosses the threshold (default 30k tokens — Mastra's default).
+ *
+ * Two practical wins:
+ *   1. Cost stops growing linearly with conversation length
+ *   2. Avoids "lost in the middle" — modern LLMs degrade on very long
+ *      prompts; summarized history surfaces what matters
+ *
+ * Uses the cheap-tier `summarize` task (Haiku-class). The summary message is
+ * tagged with role=assistant + a marker so the model knows it's
+ * compressed-context, not a real assistant reply.
+ */
+async function compressIfNeeded(
+  history: { role: "user" | "assistant"; content: string }[],
+  thresholdTokens = 30_000,
+): Promise<{ role: "user" | "assistant"; content: string }[]> {
+  if (approxTokens(history) < thresholdTokens) return history;
+  if (history.length < 6) return history;  // too short to compress meaningfully
+
+  const halfIdx = Math.floor(history.length / 2);
+  const oldTurns = history.slice(0, halfIdx);
+  const recentTurns = history.slice(halfIdx);
+
+  const oldText = oldTurns
+    .map(t => `${t.role === "user" ? "User" : "Anchor"}: ${t.content}`)
+    .join("\n");
+
+  let summary = "";
+  try {
+    summary = await text({
+      task: "summarize",
+      system:
+        "Summarize this conversation segment in 2-4 sentences. Capture: " +
+        "decisions made, recurring themes, factual claims about the user, " +
+        "open threads. Skip pleasantries. Output prose, no preamble.",
+      messages: [{ role: "user", content: oldText }],
+      maxTokens: 250,
+    });
+  } catch {
+    // If summarization fails for any reason, fall back to original history —
+    // never break the conversation flow over a compression failure.
+    return history;
+  }
+
+  return [
+    {
+      role: "assistant",
+      content: `[earlier conversation summary] ${summary}`,
+    },
+    ...recentTurns,
+  ];
+}
+
 /** Streaming version of decide() — returns async iterable of text chunks + full text promise. */
 export async function decideStream(
   message: string,
-  history: { role: "user" | "assistant"; content: string }[]
+  history: { role: "user" | "assistant"; content: string }[],
+  opts?: { contextRef?: string }
 ): Promise<{ stream: AsyncIterable<string>; fullText: Promise<string> }> {
-  const system = buildSystemPrompt(message);
+  const system = await buildSystemPrompt(message, opts?.contextRef);
+  const compressed = await compressIfNeeded(history);
 
   return textStream({
     task: "decision",
     system,
-    messages: [...history, { role: "user", content: message }],
+    messages: [...compressed, { role: "user", content: message }],
     maxTokens: 2500,
   });
 }

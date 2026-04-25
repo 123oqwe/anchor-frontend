@@ -19,11 +19,65 @@
  */
 import { nanoid } from "nanoid";
 import { db, DEFAULT_USER_ID } from "../infra/storage/db.js";
-import { text } from "../infra/compute/index.js";
+import { object } from "../infra/compute/index.js";
 import {
-  deepScanMac, profileToText,
+  deepScanMacAsync, profileToText,
   type MacProfile,
 } from "../integrations/local/deep-scan.js";
+import { profileToGraph } from "./profile-to-graph.js";
+import { ingestTimelineFromScan } from "../graph/timeline.js";
+import { z } from "zod";
+
+const InferredProfileSchema = z.object({
+  identity: z.object({
+    primary_role: z.string().default("unclear"),
+    secondary_roles: z.array(z.string()).default([]),
+    cohort_tags: z.array(z.string()).default([]),
+    confidence: z.number().min(0).max(1).default(0.3),
+  }).default({ primary_role: "unclear", secondary_roles: [], cohort_tags: [], confidence: 0.3 }),
+  cultural_context: z.object({
+    primary_region: z.string().default("unclear"),
+    languages: z.array(z.string()).default([]),
+    fluency: z.enum(["monocultural", "bicultural", "expat", "cross-border"]).default("monocultural"),
+    nuance: z.string().default(""),
+  }).default({ primary_region: "unclear", languages: [], fluency: "monocultural", nuance: "" }),
+  work_style: z.object({
+    schedule_type: z.enum(["morning", "mid-day", "evening", "late-night", "always-on", "unclear"]).default("unclear"),
+    meeting_density: z.enum(["heavy", "regular", "minimal", "async", "unknown"]).default("unknown"),
+    peak_day: z.string().optional(),
+    peak_hour: z.number().optional(),
+    focus_pattern: z.string().default(""),
+  }).default({ schedule_type: "unclear", meeting_density: "unknown", focus_pattern: "" }),
+  key_relationships: z.array(z.object({
+    identifier: z.string(),
+    role_hypothesis: z.string(),
+    relationship_strength: z.number().min(0).max(100),
+    evidence: z.string(),
+  })).default([]),
+  active_interests: z.array(z.object({
+    area: z.string(),
+    phase: z.enum(["active-executing", "learning", "exploring", "fading", "dormant"]),
+    evidence: z.string(),
+  })).default([]),
+  tensions: z.array(z.object({
+    description: z.string(),
+    evidence: z.string(),
+  })).default([]),
+  values: z.array(z.object({
+    name: z.string(),
+    stated_vs_inferred: z.enum(["stated", "inferred"]),
+    evidence: z.string(),
+    confidence: z.number().min(0).max(1),
+  })).default([]),
+  unknowns: z.array(z.string()).default([]),
+  openings_for_oracles: z.object({
+    historian: z.array(z.string()).default([]),
+    cartographer: z.array(z.string()).default([]),
+    purpose: z.array(z.string()).default([]),
+    shadow: z.array(z.string()).default([]),
+    tempo: z.array(z.string()).default([]),
+  }).default({ historian: [], cartographer: [], purpose: [], shadow: [], tempo: [] }),
+});
 
 // ── Schema migration ──────────────────────────────────────────────────────
 
@@ -45,50 +99,9 @@ try { db.exec("CREATE INDEX IF NOT EXISTS idx_profiles_user_created ON inferred_
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
-export interface InferredProfile {
-  identity: {
-    primary_role: string;                      // e.g. "AI systems builder, currently solo"
-    secondary_roles: string[];                 // e.g. ["DJ hobbyist", "finance self-learner"]
-    cohort_tags: string[];                     // e.g. ["2024-ai-native", "cn-us-bridge"]
-    confidence: number;                        // 0-1
-  };
-  cultural_context: {
-    primary_region: string;                    // e.g. "US-based Chinese heritage"
-    languages: string[];
-    fluency: "monocultural" | "bicultural" | "expat" | "cross-border";
-    nuance: string;                            // one-line reframe
-  };
-  work_style: {
-    schedule_type: "morning" | "mid-day" | "evening" | "late-night" | "always-on" | "unclear";
-    meeting_density: "heavy" | "regular" | "minimal" | "async" | "unknown";
-    peak_day?: string;
-    peak_hour?: number;
-    focus_pattern: string;                     // one-line narrative
-  };
-  key_relationships: Array<{
-    identifier: string;                        // name or handle
-    role_hypothesis: string;                   // e.g. "likely cofounder"
-    relationship_strength: number;             // 0-100
-    evidence: string;                          // why
-  }>;
-  active_interests: Array<{
-    area: string;
-    phase: "active-executing" | "learning" | "exploring" | "fading" | "dormant";
-    evidence: string;
-  }>;
-  tensions: Array<{
-    description: string;
-    evidence: string;
-  }>;
-  unknowns: string[];                          // questions for the user to resolve
-  openings_for_oracles: {
-    historian: string[];                       // what the historian should focus on
-    cartographer: string[];
-    purpose: string[];
-    shadow: string[];
-    tempo: string[];
-  };
-}
+// Single source of truth — InferredProfileSchema (above) defines the runtime
+// contract; the type is derived so they can never drift.
+export type InferredProfile = z.infer<typeof InferredProfileSchema>;
 
 // ── Prompt construction ──────────────────────────────────────────────────
 
@@ -110,6 +123,34 @@ CRITICAL RULES:
 - "openings_for_oracles" should GUIDE the 5 oracles to their sharpest
   entry points, not repeat obvious things.
 
+PRESERVE THESE UNIFIED-SCAN SIGNALS — these 7 layers are the most
+identity-revealing parts of the scan. Do NOT collapse them into generic
+phrases. When you see them, write the RAW NUMBER or IDENTIFIER into an
+"evidence" or "nuance" field so downstream Oracles can cite it:
+
+  messagesUnified    → top contact handles, chat-app split (WeChat vs
+                       iMessage vs Telegram) → key_relationships +
+                       cultural_context.nuance
+  notesUnified       → Obsidian vault names, scattered markdown count,
+                       recent topics → active_interests.evidence
+  tasksUnified       → Things/Reminders active count, task-stasis or
+                       task-manager absence → tensions OR work_style
+  emailUnified       → top sender/recipient patterns, subscription
+                       themes → key_relationships + active_interests
+  codeUnified        → author-filtered commit count, peak hour/day
+                       (git timestamps), primary repo, top commit
+                       themes → work_style.peak_hour + peak_day +
+                       active_interests.evidence
+  mediaUnified       → Rekordbox track count (DJ), Apple Music vs
+                       NetEase split → secondary_roles +
+                       cultural_context.nuance
+  locationUnified    → cafe WiFi count, calendar location diversity
+                       → work_style + cohort_tags
+
+If the scan names a specific artifact (repo name, playlist size,
+contact handle, vault name), the InferredProfile MUST carry that
+specific name forward — Oracles cannot cite what you don't preserve.
+
 Output format: a JSON object matching this TypeScript type. Only emit JSON —
 no preamble, no markdown fences.
 
@@ -120,9 +161,21 @@ type InferredProfile = {
   key_relationships: Array<{ identifier: string; role_hypothesis: string; relationship_strength: number; evidence: string; }>;
   active_interests: Array<{ area: string; phase: "active-executing"|"learning"|"exploring"|"fading"|"dormant"; evidence: string; }>;
   tensions: Array<{ description: string; evidence: string; }>;
+  values: Array<{ name: string; stated_vs_inferred: "stated"|"inferred"; evidence: string; confidence: number; }>;
   unknowns: string[];
   openings_for_oracles: { historian: string[]; cartographer: string[]; purpose: string[]; shadow: string[]; tempo: string[]; };
-};`;
+};
+
+VALUES extraction — populate the "values" array with 3-8 entries. Values are
+what the user cares about deeply that shapes their choices. Examples:
+"craft over speed", "asynchronous work", "Chinese-American bridging",
+"local-first / privacy", "tight feedback loops", "solo deep work".
+- A value is STATED when the user's own text (notes, PRDs, commit
+  messages) explicitly argues for it. Otherwise INFERRED (from tool
+  choice, time allocation, absences, tensions).
+- Confidence should be lower (0.4-0.6) for purely-inferred values and
+  higher (0.7-0.9) for values with direct textual evidence.
+- Values must be short noun phrases (1-4 words ideally), not sentences.`;
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────
@@ -146,8 +199,13 @@ function loadUserFeedback(): string {
 export async function inferProfile(opts?: {
   macProfile?: MacProfile;
   persist?: boolean;   // default true
+  writeGraph?: boolean; // default true when persist is true
 }): Promise<InferredProfile> {
-  const profile = opts?.macProfile ?? deepScanMac();
+  // deepScanMacAsync (not sync deepScanMac) so all 7 unified layers are
+  // populated before the LLM consumes profileToText. The API-triggered
+  // Portrait path relied on the sync version previously and silently
+  // missed messagesUnified / notesUnified / tasksUnified / etc.
+  const profile = opts?.macProfile ?? await deepScanMacAsync();
   const profileText = profileToText(profile);
   const feedback = loadUserFeedback();
 
@@ -155,48 +213,32 @@ export async function inferProfile(opts?: {
     "Here is the scan data. Produce the InferredProfile JSON:\n\n" +
     profileText + feedback;
 
-  const raw = await text({
+  const parsed = await object({
     task: "decision",  // prefer a stronger model for structured output
     system: buildSystemPrompt(),
     messages: [{ role: "user", content: userMessage }],
-    maxTokens: 4000,
+    schema: InferredProfileSchema,
+    maxTokens: 8000,
     agentName: "Profile Inference",
-  });
-
-  const stripped = raw.replace(/```json\s*/g, "").replace(/```/g, "").trim();
-
-  // Extract the FIRST balanced JSON object — more robust than regex
-  const jsonText = extractFirstJsonObject(stripped);
-  if (!jsonText) {
-    throw new Error("Profile Inference LLM returned no JSON. First 300 chars: " + raw.slice(0, 300));
-  }
-
-  let parsed: InferredProfile;
-  try {
-    parsed = JSON.parse(jsonText) as InferredProfile;
-  } catch (err: any) {
-    // One repair attempt: truncate at last known-good closing brace
-    const repaired = repairTruncatedJson(jsonText);
-    if (repaired) {
-      try { parsed = JSON.parse(repaired) as InferredProfile; }
-      catch { throw new Error("Profile Inference JSON parse failed (repair failed too): " + err.message); }
-    } else {
-      throw new Error("Profile Inference JSON parse failed: " + err.message);
-    }
-  }
-
-  // Light shape validation — fill reasonable defaults for missing keys
-  parsed.identity ??= { primary_role: "unclear", secondary_roles: [], cohort_tags: [], confidence: 0.3 };
-  parsed.cultural_context ??= { primary_region: "unclear", languages: [], fluency: "monocultural", nuance: "" };
-  parsed.work_style ??= { schedule_type: "unclear", meeting_density: "unknown", focus_pattern: "" };
-  parsed.key_relationships ??= [];
-  parsed.active_interests ??= [];
-  parsed.tensions ??= [];
-  parsed.unknowns ??= [];
-  parsed.openings_for_oracles ??= { historian: [], cartographer: [], purpose: [], shadow: [], tempo: [] };
+  }) as InferredProfile;
 
   if (opts?.persist !== false) {
     persistProfile(parsed, profileText);
+  }
+
+  // Decompose profile into graph nodes/edges so the Human Graph stays in
+  // sync with the structured identity/relationships/interests/tensions
+  // layer. Only skipped when the caller explicitly opts out OR the profile
+  // was not persisted (non-persisted runs are dry-run by contract).
+  const shouldWriteGraph = opts?.writeGraph !== false && opts?.persist !== false;
+  if (shouldWriteGraph) {
+    try { profileToGraph(parsed); }
+    catch (err: any) { console.error("[Profile→Graph] failed:", err.message); }
+    // Ingest per-event timeline data (calendar meetings + git commits) and
+    // link them to the freshly-written graph nodes. Must run AFTER
+    // profileToGraph so event→node links can resolve.
+    try { ingestTimelineFromScan(profile); }
+    catch (err: any) { console.error("[Timeline] ingest failed:", err.message); }
   }
 
   return parsed;
@@ -230,47 +272,6 @@ export function listProfileVersions(userId = DEFAULT_USER_ID): Array<{ id: strin
   return db.prepare(
     "SELECT id, version, created_at FROM inferred_profiles WHERE user_id=? ORDER BY version DESC"
   ).all(userId) as any[];
-}
-
-/** Find the first balanced JSON object by scanning braces (ignores strings). */
-function extractFirstJsonObject(s: string): string | null {
-  const start = s.indexOf("{");
-  if (start < 0) return null;
-  let depth = 0;
-  let inString = false;
-  let escape = false;
-  for (let i = start; i < s.length; i++) {
-    const ch = s[i];
-    if (inString) {
-      if (escape) { escape = false; continue; }
-      if (ch === "\\") { escape = true; continue; }
-      if (ch === '"') { inString = false; continue; }
-      continue;
-    }
-    if (ch === '"') { inString = true; continue; }
-    if (ch === "{") depth++;
-    else if (ch === "}") {
-      depth--;
-      if (depth === 0) return s.slice(start, i + 1);
-    }
-  }
-  return null; // unbalanced / truncated
-}
-
-/**
- * Attempt to salvage truncated JSON by trimming back to last valid state
- * and closing open arrays/objects. Best-effort, fires only on parse error.
- */
-function repairTruncatedJson(s: string): string | null {
-  // Walk backward to find last balanced close position — too brittle to do
-  // generically; instead try progressively stricter truncations
-  for (let cut = s.length; cut > 100; cut -= 100) {
-    const lastClose = s.lastIndexOf("}", cut);
-    if (lastClose < 0) return null;
-    const candidate = s.slice(0, lastClose + 1);
-    try { JSON.parse(candidate); return candidate; } catch {}
-  }
-  return null;
 }
 
 function hashString(s: string): string {

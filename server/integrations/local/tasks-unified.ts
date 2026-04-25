@@ -17,6 +17,7 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 import Database from "better-sqlite3";
+import { shadowEmit } from "../../infra/storage/scanner-events.js";
 
 const HOME = os.homedir();
 const APPS = ["/Applications", path.join(HOME, "Applications")];
@@ -282,7 +283,7 @@ export async function scanTasksUnified(): Promise<TasksUnifiedSummary> {
   const needsPerms = apps.filter(a => a.permissionNeeded);
   const coverage = buildCoverage(apps);
 
-  return {
+  const result: TasksUnifiedSummary = {
     apps,
     totalAppsInstalled: apps.filter(a => a.installed).length,
     totalActiveSystems: active.length,
@@ -293,6 +294,24 @@ export async function scanTasksUnified(): Promise<TasksUnifiedSummary> {
     signals,
     coverage: coverage + (needsPerms.length > 0 ? `. Needs permissions: ${needsPerms.map(a => a.displayName).join(", ")}` : ""),
   };
+
+  shadowEmit({
+    scanner: "tasks-unified",
+    source: "manual",
+    kind: "tasks_scan_summary",
+    stableFields: { scanDay: new Date().toISOString().slice(0, 10) },
+    payload: {
+      totalAppsInstalled: result.totalAppsInstalled,
+      totalActiveSystems: result.totalActiveSystems,
+      primarySystem: result.primarySystem,
+      totalOpenTasks: result.totalOpenTasks,
+      totalOverdueTasks: result.totalOverdueTasks,
+      totalCompletedLast7d: result.totalCompletedLast7d,
+      apps: result.apps.map(a => ({ id: a.appId, active: a.active, tier: a.tier, openCount: a.openCount })),
+    },
+  });
+
+  return result;
 }
 
 function buildCoverage(apps: TaskApp[]): string {

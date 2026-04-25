@@ -16,9 +16,38 @@
  */
 import { db, DEFAULT_USER_ID, logExecution } from "../infra/storage/db.js";
 import { bus, type StepChange } from "../orchestration/bus.js";
-import { text } from "../infra/compute/index.js";
+import { text, object } from "../infra/compute/index.js";
 import { writeMemory, writeTwinInsight, writeDialecticInsight } from "../memory/retrieval.js";
 import { createNode } from "../graph/writer.js";
+import { z } from "zod";
+// Phase 2 pilot: Twin's identity/role/voice live in TwinAgentSpec, composed
+// at runtime with user overrides. The legacy hardcoded prompt remains as
+// fallback if the composer returns empty (defensive — composer never
+// throws, but a malformed spec or DB issue could yield <50 chars).
+import { TwinAgentSpec } from "./system-agents/twin.js";
+import { composeSystemAgentConfig } from "./agent-spec.js";
+import { buildSystemPromptFromConfig } from "./agent-config.js";
+import { pickVariant } from "../orchestration/experiment-runner.js";
+
+// Twin always returns the same minimal shape: a category + insight + confidence,
+// optionally a contraindication. Defining once + reusing avoids the historical
+// pattern of "ask LLM for JSON, regex out the brace block, hope JSON.parse
+// doesn't throw." generateObject + this schema makes the contract explicit
+// and the parse failure-proof (Vercel AI SDK auto-retries on mismatch).
+const TwinInsightSchema = z.object({
+  category: z.string().min(1),
+  insight: z.string().min(1),
+  confidence: z.number().min(0).max(1),
+  contraindication: z.string().optional(),
+});
+
+const TwinDriftSchema = z.object({
+  drift_detected: z.boolean(),
+  drift_description: z.string().nullable(),
+  old_pattern: z.string().nullable(),
+  new_pattern: z.string().nullable(),
+  confidence: z.number().min(0).max(1),
+});
 
 // ── 1. Learn from user edits ────────────────────────────────────────────────
 
@@ -28,16 +57,32 @@ export async function twinLearnFromEdits(changes: StepChange[]) {
   console.log("[Twin Sidecar] Learning from user edits...");
 
   try {
-    const result = await text({
-      task: "twin_edit_learning",
-      system: `You are Anchor's Twin Agent. Observe how the user modifies AI suggestions.
-Extract ONE insight AND check if this reveals something the system should STOP suggesting.
+    // Compose Soul/Body/Faculty header from spec + user overrides. The
+    // schema-only operational instructions (output JSON shape, example)
+    // stay inline because they're how this CALL works, not who Twin IS.
+    const composed = composeSystemAgentConfig(TwinAgentSpec);
+    const specHeader = buildSystemPromptFromConfig(composed);
+
+    const operationalInstructions = `Extract ONE insight AND check if this reveals something the system should STOP suggesting.
 
 Respond ONLY with JSON:
 {"category":"string","insight":"string","confidence":0.0-1.0,"contraindication":"string or null"}
 
 contraindication = something the system should NOT suggest in the future (null if none).
-Example: user always deletes "schedule a call" → contraindication: "Do not suggest phone calls"`,
+Example: user always deletes "schedule a call" → contraindication: "Do not suggest phone calls"`;
+
+    // Defensive fallback: if composer returned empty/nearly-empty, use
+    // legacy preamble so we never ship a contentless system prompt.
+    const baseSystem = specHeader && specHeader.length >= 50
+      ? `${specHeader}\n\n${operationalInstructions}`
+      : `You are Anchor's Twin Agent. Observe how the user modifies AI suggestions.\n${operationalInstructions}`;
+    // Sprint A — #7 prompt A/B. No experiment → identical to baseSystem.
+    const finalSystem = pickVariant({ key: "twin.edit_learning_prompt", fallback: baseSystem }).value;
+
+    const parsed = await object({
+      task: "twin_edit_learning",
+      schema: TwinInsightSchema,
+      system: finalSystem,
       messages: [{
         role: "user",
         content: `Changes:\n${meaningful.map(c => {
@@ -50,13 +95,10 @@ Example: user always deletes "schedule a call" → contraindication: "Do not sug
       maxTokens: 250,
     });
 
-    const jsonMatch = result.replace(/```json\s*/g, "").replace(/```/g, "").match(/\{[^}]+\}/);
-    if (!jsonMatch) return;
-    const parsed = JSON.parse(jsonMatch[0]);
-    if (parsed?.insight) {
-      writeTwinInsight({ category: parsed.category ?? "behavior", insight: parsed.insight, confidence: parsed.confidence ?? 0.7 });
-      const nodeType = (parsed.category ?? "").includes("preference") ? "preference" : "behavioral_pattern";
-      const shortLabel = `${(parsed.category ?? "pattern").replace(/_/g, " ")}: ${parsed.insight.split(/[.!,;]/)[0].trim()}`.slice(0, 40);
+    if (parsed.insight) {
+      writeTwinInsight({ category: parsed.category, insight: parsed.insight, confidence: parsed.confidence });
+      const nodeType = parsed.category.includes("preference") ? "preference" : "behavioral_pattern";
+      const shortLabel = `${parsed.category.replace(/_/g, " ")}: ${parsed.insight.split(/[.!,;]/)[0].trim()}`.slice(0, 40);
       createNode({ domain: "growth", label: shortLabel, type: nodeType, status: "active", captured: "Twin Agent inference", detail: parsed.insight });
 
       // Contraindication → write to graph as a constraint
@@ -87,10 +129,10 @@ Example: user always deletes "schedule a call" → contraindication: "Do not sug
 export async function twinLearnFromResults(payload: { steps_result: any[]; plan_summary: string }) {
   console.log("[Twin Agent] Learning from execution results...");
   try {
-    const result = await text({
+    const parsed = await object({
       task: "twin_result_learning",
-      system: `You are Anchor's Twin Agent. Analyze execution results. Extract ONE insight.
-Respond ONLY with JSON: {"category":"string","insight":"string","confidence":0.0-1.0}`,
+      schema: TwinInsightSchema,
+      system: `You are Anchor's Twin Agent. Analyze execution results. Extract ONE insight.`,
       messages: [{
         role: "user",
         content: `Plan: ${payload.plan_summary}\n\nResults:\n${payload.steps_result.map(s => `[${s.status}] ${s.step}: ${s.result}`).join("\n")}`,
@@ -98,11 +140,8 @@ Respond ONLY with JSON: {"category":"string","insight":"string","confidence":0.0
       maxTokens: 200,
     });
 
-    const jsonMatch = result.replace(/```json\s*/g, "").replace(/```/g, "").match(/\{[^}]+\}/);
-    if (!jsonMatch) return;
-    const parsed = JSON.parse(jsonMatch[0]);
-    if (parsed?.insight) {
-      writeTwinInsight({ category: parsed.category ?? "behavior", insight: parsed.insight, confidence: parsed.confidence ?? 0.7 });
+    if (parsed.insight) {
+      writeTwinInsight({ category: parsed.category, insight: parsed.insight, confidence: parsed.confidence });
       writeMemory({ type: "episodic", title: "Execution Result", content: `Plan: ${payload.plan_summary}. ${payload.steps_result.length} steps.`, tags: ["execution", "result"], source: "Execution Agent", confidence: 0.9 });
       logExecution("Twin Agent", `Result insight: ${parsed.insight.slice(0, 60)}`);
       bus.publish({ type: "TWIN_UPDATED", payload: { insight: parsed.insight } });
@@ -159,19 +198,11 @@ export async function detectDrift(): Promise<void> {
   if (recent.length < 3 || older.length < 3) return; // not enough data
 
   try {
-    const result = await text({
+    const parsed = await object({
       task: "twin_edit_learning",
+      schema: TwinDriftSchema,
       system: `You detect behavioral DRIFT — when a user's patterns are changing over time.
-Compare recent vs older behavioral insights.
-
-Respond ONLY with JSON:
-{
-  "drift_detected": true|false,
-  "drift_description": "what changed (or null if no drift)",
-  "old_pattern": "what they used to do",
-  "new_pattern": "what they do now",
-  "confidence": 0.0-1.0
-}`,
+Compare recent vs older behavioral insights.`,
       messages: [{
         role: "user",
         content: `RECENT (last 7 days):\n${recent.map(r => `[${r.category}] ${r.insight}`).join("\n")}\n\nOLDER (7-30 days ago):\n${older.map(o => `[${o.category}] ${o.insight}`).join("\n")}`,
@@ -179,15 +210,11 @@ Respond ONLY with JSON:
       maxTokens: 200,
     });
 
-    const jsonMatch = result.replace(/```json\s*/g, "").replace(/```/g, "").match(/\{[\s\S]*?\}/);
-    if (!jsonMatch) return;
-    const parsed = JSON.parse(jsonMatch[0]);
-
     if (parsed.drift_detected && parsed.drift_description) {
       writeTwinInsight({
         category: "drift",
         insight: `DRIFT: ${parsed.drift_description}. Was: ${parsed.old_pattern ?? "unknown"}. Now: ${parsed.new_pattern ?? "unknown"}.`,
-        confidence: parsed.confidence ?? 0.6,
+        confidence: parsed.confidence,
       });
       createNode({
         domain: "growth",

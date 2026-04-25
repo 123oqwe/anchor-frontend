@@ -585,6 +585,110 @@ try { db.exec("ALTER TABLE skills ADD COLUMN source TEXT NOT NULL DEFAULT 'dream
 
 try { db.exec("ALTER TABLE graph_edges ADD COLUMN valid_from TEXT"); } catch {}
 try { db.exec("ALTER TABLE graph_edges ADD COLUMN valid_to TEXT"); } catch {}
+// Backfill legacy edges: valid_from defaults to their created_at; valid_to stays NULL ("currently active")
+try { db.exec("UPDATE graph_edges SET valid_from = created_at WHERE valid_from IS NULL"); } catch {}
+// Index active edges for fast "currently valid" queries
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_edges_active ON graph_edges(user_id, from_node_id, to_node_id, type) WHERE valid_to IS NULL"); } catch {}
+
+// ── Phase 2 — System agent overrides (Mode C: per-field lock) ─────────────
+// User customizations to the 11 hardcoded system agents (Twin, Decision,
+// Council, ...). Each row overrides one USER-locked field path. LOCKED
+// fields silently ignore any rows here (composer guards). Schema_version
+// tied to the agent's spec.schemaVersion so future migrations can rename
+// or drop fields without orphan-loss.
+try { db.exec(`CREATE TABLE IF NOT EXISTS system_agent_overrides (
+  agent_id TEXT NOT NULL,
+  field_path TEXT NOT NULL,
+  value TEXT NOT NULL,
+  set_at TEXT NOT NULL DEFAULT (datetime('now')),
+  schema_version INTEGER NOT NULL DEFAULT 1,
+  PRIMARY KEY (agent_id, field_path)
+)`); } catch {}
+
+// User-added items for ADD_ONLY fields (constraints, examples, skills...).
+// Many-rows-per-agent-per-path; each item is one row. Anchor's built-in
+// items live in the spec defaults — these append, never replace.
+try { db.exec(`CREATE TABLE IF NOT EXISTS system_agent_additions (
+  id TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL,
+  field_path TEXT NOT NULL,
+  value TEXT NOT NULL,
+  added_at TEXT NOT NULL DEFAULT (datetime('now')),
+  schema_version INTEGER NOT NULL DEFAULT 1
+)`); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_sys_agent_add ON system_agent_additions(agent_id, field_path)"); } catch {}
+
+// System cron overrides — flat shape. snooze_until is the most-used field
+// (pause for a week while traveling). Persists across reboots. Cleared by
+// passing null in PUT /api/system/cron/:id/snooze.
+try { db.exec(`CREATE TABLE IF NOT EXISTS system_cron_overrides (
+  cron_id TEXT PRIMARY KEY,
+  snooze_until TEXT,
+  proactive_off INTEGER NOT NULL DEFAULT 0,
+  user_added_conditions TEXT NOT NULL DEFAULT '[]',
+  schema_version INTEGER NOT NULL DEFAULT 1,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+)`); } catch {}
+
+// ── Bi-temporal columns for graph_nodes ─────────────────────────────────────
+// Two orthogonal time axes, per Snodgrass (1999) TSQL2 semantics:
+//   valid_from / valid_to — when the FACT is true in the world. Node represents
+//     something that exists as of valid_from; if valid_to is non-NULL, the node
+//     describes a fact that has ceased to be true (e.g., a person no longer in
+//     your circle, a project that ended). NULL valid_to = currently valid.
+//   recorded_at — when Anchor LEARNED of this fact. The transaction-time axis.
+//     Differs from valid_from when a scanner imports a backdated event
+//     (e.g., an old email discovered today represents a fact that's been true
+//     since the email's sent-date, but was recorded today).
+// Existing nodes: best-effort backfill. We don't know the actual occurrence
+// time so we assume they became valid at insertion (valid_from = created_at)
+// and were learned at insertion (recorded_at = created_at). Future writes
+// should populate these explicitly when the source provides occurrence time.
+try { db.exec("ALTER TABLE graph_nodes ADD COLUMN valid_from TEXT"); } catch {}
+try { db.exec("ALTER TABLE graph_nodes ADD COLUMN valid_to TEXT"); } catch {}
+try { db.exec("ALTER TABLE graph_nodes ADD COLUMN recorded_at TEXT"); } catch {}
+try { db.exec("UPDATE graph_nodes SET valid_from = created_at WHERE valid_from IS NULL"); } catch {}
+try { db.exec("UPDATE graph_nodes SET recorded_at = created_at WHERE recorded_at IS NULL"); } catch {}
+// Index currently-valid nodes for fast "as-of now" queries
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_nodes_active ON graph_nodes(user_id, domain, type) WHERE valid_to IS NULL"); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_nodes_valid_from ON graph_nodes(user_id, valid_from)"); } catch {}
+// Zero-invasion auto-populate trigger — any INSERT (including the 7 existing
+// writer sites that predate bi-temporality) gets valid_from/recorded_at filled
+// from created_at. Writers that want to backdate (scanner imports of old
+// facts) can still set valid_from explicitly; the trigger only fires when
+// the column is NULL. COALESCE guards against the NEW.created_at default
+// race: if a caller supplies NULL for all time columns, SQLite's DEFAULT
+// for created_at has already populated it by the time this trigger runs.
+try { db.exec(`CREATE TRIGGER IF NOT EXISTS graph_nodes_bitemporal_default
+  AFTER INSERT ON graph_nodes
+  WHEN NEW.valid_from IS NULL OR NEW.recorded_at IS NULL
+  BEGIN
+    UPDATE graph_nodes SET
+      valid_from  = COALESCE(NEW.valid_from,  NEW.created_at, datetime('now')),
+      recorded_at = COALESCE(NEW.recorded_at, NEW.created_at, datetime('now'))
+    WHERE id = NEW.id;
+  END`); } catch {}
+
+// Timeline events — per-event timestamped rows aggregated from unified scans.
+// Events LINK to graph nodes via related_node_ids (JSON array) for node-centric
+// timeline queries ("interactions with X this month") without exploding the
+// graph into one node per commit/meeting/message.
+try { db.exec(`CREATE TABLE IF NOT EXISTS timeline_events (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  external_id TEXT NOT NULL,
+  occurred_at TEXT NOT NULL,
+  source TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  detail TEXT,
+  related_node_ids TEXT NOT NULL DEFAULT '[]',
+  metadata TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+)`); } catch {}
+try { db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_timeline_external ON timeline_events(user_id, external_id)"); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_timeline_time ON timeline_events(user_id, occurred_at DESC)"); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_timeline_source ON timeline_events(user_id, source, occurred_at DESC)"); } catch {}
 
 // OPT-4: run_id for trace correlation across tools + LLM calls
 try { db.exec("ALTER TABLE agent_executions ADD COLUMN run_id TEXT"); } catch {}
@@ -593,11 +697,293 @@ try { db.exec("ALTER TABLE llm_calls ADD COLUMN agent_name TEXT"); } catch {}
 try { db.exec("CREATE INDEX IF NOT EXISTS idx_exec_run ON agent_executions(run_id)"); } catch {}
 try { db.exec("CREATE INDEX IF NOT EXISTS idx_llm_run ON llm_calls(run_id)"); } catch {}
 
+// Prompt caching instrumentation — Anthropic reports cache tokens separately
+// from regular input tokens. Store both so cost/hit-rate are observable.
+try { db.exec("ALTER TABLE llm_calls ADD COLUMN cache_creation_tokens INTEGER"); } catch {}
+try { db.exec("ALTER TABLE llm_calls ADD COLUMN cache_read_tokens INTEGER"); } catch {}
+
+// Mutation proposals — L3 "eval-as-gate" infrastructure. Any learner
+// (GEPA / Evolution / Skills) that wants to mutate system behavior
+// submits a proposal here instead of applying directly. The gate
+// runs eval fixtures against before/after; only accepted proposals
+// get applied. Rejected ones are kept for audit.
+try { db.exec(`CREATE TABLE IF NOT EXISTS mutation_proposals (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  source TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  target TEXT NOT NULL,
+  before_json TEXT,
+  after_json TEXT NOT NULL,
+  rationale TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',
+  eval_score REAL,
+  eval_threshold REAL NOT NULL DEFAULT 0.8,
+  eval_baseline_score REAL,
+  eval_fixture_ids TEXT,
+  eval_report_json TEXT,
+  reject_reason TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  evaluated_at TEXT,
+  applied_at TEXT
+)`); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_proposals_status ON mutation_proposals(status, created_at DESC)"); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_proposals_source ON mutation_proposals(source, status, created_at DESC)"); } catch {}
+
+// Workflow DAG — L4 orchestration upgrade. Replaces "blind parallel cron"
+// with dependency-aware runs. workflow_defs holds the DAG; workflow_runs
+// is per-execution; workflow_jobs tracks each node's outcome so a failed
+// upstream can cascade-skip its dependents instead of letting them fire
+// on stale data.
+try { db.exec(`CREATE TABLE IF NOT EXISTS workflow_defs (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  description TEXT,
+  schedule TEXT,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  jobs_json TEXT NOT NULL,
+  trigger_event TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+)`); } catch {}
+try { db.exec(`CREATE TABLE IF NOT EXISTS workflow_runs (
+  id TEXT PRIMARY KEY,
+  workflow_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'running',
+  trigger_kind TEXT,
+  started_at TEXT NOT NULL DEFAULT (datetime('now')),
+  finished_at TEXT,
+  error TEXT
+)`); } catch {}
+try { db.exec(`CREATE TABLE IF NOT EXISTS workflow_jobs (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  job_id TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  handler TEXT NOT NULL,
+  error TEXT,
+  output_json TEXT,
+  started_at TEXT,
+  finished_at TEXT,
+  duration_ms INTEGER,
+  wave_index INTEGER
+)`); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_workflow_runs ON workflow_runs(workflow_id, started_at DESC)"); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_workflow_jobs_run ON workflow_jobs(run_id, wave_index)"); } catch {}
+
+// Memory lifecycle — track last access for Ebbinghaus-style decay + consolidation lineage.
+try { db.exec("ALTER TABLE memories ADD COLUMN last_accessed_at TEXT"); } catch {}
+try { db.exec("ALTER TABLE memories ADD COLUMN consolidated_from TEXT"); } catch {}
+try { db.exec("ALTER TABLE memories ADD COLUMN status TEXT NOT NULL DEFAULT 'active'"); } catch {}
+try { db.exec("UPDATE memories SET last_accessed_at = created_at WHERE last_accessed_at IS NULL"); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_memories_status_conf ON memories(user_id, status, confidence DESC)"); } catch {}
+
+// Bi-temporal memories: `recorded_at` is when Anchor ingested the memory
+// (transaction time); `valid_from/valid_to` is when the referenced FACT
+// is/was true (e.g., an observation about a meeting has valid_from = meeting
+// date, recorded_at = when the memory was written). Recency decay in
+// retrieval.ts should use recorded_at (freshness of ingestion) while
+// semantic queries about "what did I know in March" use valid_from.
+try { db.exec("ALTER TABLE memories ADD COLUMN valid_from TEXT"); } catch {}
+try { db.exec("ALTER TABLE memories ADD COLUMN valid_to TEXT"); } catch {}
+try { db.exec("ALTER TABLE memories ADD COLUMN recorded_at TEXT"); } catch {}
+try { db.exec("UPDATE memories SET valid_from = created_at WHERE valid_from IS NULL"); } catch {}
+try { db.exec("UPDATE memories SET recorded_at = created_at WHERE recorded_at IS NULL"); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_memories_valid_from ON memories(user_id, valid_from)"); } catch {}
+// Same zero-invasion pattern — auto-populate bi-temporal fields on INSERT
+// so the ~10 writeMemory call sites don't need to be touched. FTS triggers
+// already defined above fire on INSERT too — SQLite runs all matching
+// triggers; ordering doesn't matter since they target different columns.
+try { db.exec(`CREATE TRIGGER IF NOT EXISTS memories_bitemporal_default
+  AFTER INSERT ON memories
+  WHEN NEW.valid_from IS NULL OR NEW.recorded_at IS NULL
+  BEGIN
+    UPDATE memories SET
+      valid_from  = COALESCE(NEW.valid_from,  NEW.created_at, datetime('now')),
+      recorded_at = COALESCE(NEW.recorded_at, NEW.created_at, datetime('now'))
+    WHERE id = NEW.id;
+  END`); } catch {}
+
+// Memory arbitrations — contradictions too-serious-to-auto-resolve that
+// the user needs to review. Low-confidence contradictions still get
+// auto-merged by dream.ts. This queue is for pairs where BOTH sides
+// have high confidence and a naive merge would lose information.
+try { db.exec(`CREATE TABLE IF NOT EXISTS memory_arbitrations (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  kind TEXT NOT NULL,                 -- memory | graph_edge | profile_claim
+  left_id TEXT NOT NULL,              -- id of first item
+  right_id TEXT NOT NULL,             -- id of second item
+  left_preview TEXT,
+  right_preview TEXT,
+  topic TEXT,                         -- LLM-generated short label
+  severity TEXT NOT NULL DEFAULT 'medium',  -- low | medium | high
+  status TEXT NOT NULL DEFAULT 'open',      -- open | resolved | ignored
+  resolution TEXT,                    -- keep_left | keep_right | keep_both | custom
+  resolution_note TEXT,
+  resolved_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+)`); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_arbitrations_status ON memory_arbitrations(status, created_at DESC)"); } catch {}
+
+// Implicit feedback events — the training-signal ledger.
+// Captures edit-distance on agent outputs, re-prompts, abandonment,
+// tool rejections, and explicit thumbs. Stored as typed rows so future
+// RLHF / DPO / on-policy learning can replay them without re-scraping
+// any other table. <1% of real user feedback is explicit, so this
+// ledger is where the learning signal actually lives.
+try { db.exec(`CREATE TABLE IF NOT EXISTS feedback_events (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  kind TEXT NOT NULL,            -- edit_distance | re_prompt | abandonment | tool_rejection | thumbs_up | thumbs_down | regeneration
+  subject_type TEXT NOT NULL,    -- agent_output | tool_call | portrait_claim | graph_inference
+  subject_id TEXT,               -- runId / toolUseId / claim id / node id
+  agent_id TEXT,
+  run_id TEXT,
+  signal REAL NOT NULL DEFAULT 0, -- -1.0 (strong negative) .. +1.0 (strong positive)
+  payload TEXT,                  -- JSON: edit_distance, original, modified, similarity_score, etc.
+  source TEXT NOT NULL DEFAULT 'implicit_detector',  -- ui | cli | implicit_detector | cron
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+)`); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_feedback_subject ON feedback_events(subject_type, subject_id, created_at DESC)"); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_feedback_agent ON feedback_events(agent_id, kind, created_at DESC)"); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_feedback_run ON feedback_events(run_id)"); } catch {}
+
+// Guardrail events — every classifier verdict on user input / tool results
+// gets logged here so audits can reconstruct what was flagged and why.
+// severity=block rows are the actual prevented attacks; warn/info are near-misses.
+try { db.exec(`CREATE TABLE IF NOT EXISTS guardrail_events (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  run_id TEXT,
+  agent_id TEXT,
+  context TEXT NOT NULL,
+  origin TEXT,
+  severity TEXT NOT NULL,
+  flags_json TEXT NOT NULL DEFAULT '[]',
+  reason TEXT,
+  preview TEXT,
+  classifier_model TEXT,
+  classifier_latency_ms INTEGER,
+  fail_open INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+)`); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_guardrail_run ON guardrail_events(run_id, created_at)"); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_guardrail_severity ON guardrail_events(severity, created_at DESC)"); } catch {}
+
+// External MCP servers — inbound MCP (Anchor as client). Extends existing
+// mcp_servers table (defined earlier) with columns needed for stdio
+// transport + auto-connect + error tracking.
+try { db.exec("ALTER TABLE mcp_servers ADD COLUMN command TEXT"); } catch {}
+try { db.exec("ALTER TABLE mcp_servers ADD COLUMN args_json TEXT NOT NULL DEFAULT '[]'"); } catch {}
+try { db.exec("ALTER TABLE mcp_servers ADD COLUMN env_json TEXT NOT NULL DEFAULT '{}'"); } catch {}
+try { db.exec("ALTER TABLE mcp_servers ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1"); } catch {}
+try { db.exec("ALTER TABLE mcp_servers ADD COLUMN last_connected_at TEXT"); } catch {}
+try { db.exec("ALTER TABLE mcp_servers ADD COLUMN last_error TEXT"); } catch {}
+try { db.exec("ALTER TABLE mcp_servers ADD COLUMN updated_at TEXT NOT NULL DEFAULT (datetime('now'))"); } catch {}
+try { db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_mcp_server_name ON mcp_servers(user_id, name)"); } catch {}
+
+// Agent run checkpoints — every ReAct turn snapshots here so long-horizon
+// runs survive crashes AND agents can request_user_input to pause cleanly
+// and resume later. status lifecycle: running → interrupted | completed |
+// failed | cancelled | abandoned (auto-set on boot for stale runs).
+try { db.exec(`CREATE TABLE IF NOT EXISTS agent_runs (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  agent_name TEXT NOT NULL,
+  mission_id TEXT,
+  status TEXT NOT NULL DEFAULT 'running',
+  turn INTEGER NOT NULL DEFAULT 0,
+  max_turns INTEGER NOT NULL DEFAULT 25,
+  user_message TEXT NOT NULL,
+  messages_json TEXT NOT NULL DEFAULT '[]',
+  tool_calls_json TEXT NOT NULL DEFAULT '[]',
+  system_prompt TEXT NOT NULL DEFAULT '',
+  allowed_tools_json TEXT NOT NULL DEFAULT '[]',
+  final_text TEXT,
+  interrupt_reason TEXT,
+  interrupt_question TEXT,
+  error TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+)`); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_agent_runs_status ON agent_runs(status, updated_at DESC)"); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_agent_runs_agent ON agent_runs(agent_id, created_at DESC)"); } catch {}
+
 // L5 Execution rebuild: per-agent scoping for code execution + bridge access
 try { db.exec("ALTER TABLE user_agents ADD COLUMN allowed_bridges TEXT NOT NULL DEFAULT '[\"*\"]'"); } catch {}
 try { db.exec("ALTER TABLE user_agents ADD COLUMN allowed_dirs TEXT NOT NULL DEFAULT '[]'"); } catch {}
 try { db.exec("ALTER TABLE user_agents ADD COLUMN network_policy TEXT NOT NULL DEFAULT 'bridge-only'"); } catch {}
 try { db.exec("ALTER TABLE user_agents ADD COLUMN execution_backend TEXT NOT NULL DEFAULT 'local'"); } catch {}
+
+// ── OpenClaw 4-layer + Hermes-style structured config (custom agents only) ──
+// Adds Soul (durable identity), Body (role + responsibilities + constraints),
+// Faculty (skills + read scopes), examples (few-shot), rhythm (trigger),
+// vitality (lifecycle metrics) into a single JSON blob to avoid 12 ALTER
+// TABLEs. The legacy `instructions` / `tools` / `trigger_type` / `trigger_config`
+// columns stay authoritative for backward compat — config_json layers on top.
+// SCOPE: custom agents only. System agents (decision/twin/council/dream) are
+// untouched and continue to use their existing prompt code paths.
+try { db.exec("ALTER TABLE user_agents ADD COLUMN config_json TEXT NOT NULL DEFAULT '{}'"); } catch {}
+// Same structure for user_crons — purpose, voice, pre-fire conditions,
+// snooze_until, vitality. Existing legacy columns untouched.
+try { db.exec("ALTER TABLE user_crons ADD COLUMN config_json TEXT NOT NULL DEFAULT '{}'"); } catch {}
+
+// One-shot backfill for legacy rows: derive a sensible default config from
+// existing fields so the new buildSystemPromptFromConfig() helper can read
+// them without crashing. Idempotent — only fills rows where config_json is
+// the empty default '{}'.
+try {
+  const legacyAgents = db.prepare(
+    "SELECT id, name, instructions, trigger_type, trigger_config, tools FROM user_agents WHERE config_json IN ('{}', '')"
+  ).all() as any[];
+  const upd = db.prepare("UPDATE user_agents SET config_json=? WHERE id=?");
+  for (const a of legacyAgents) {
+    const seed = {
+      soul: {
+        purpose: String(a.instructions ?? "").slice(0, 140),  // first ~140 chars as durable purpose
+        voice: "",
+        values: [],
+      },
+      body: {
+        role: a.name,
+        responsibilities: [],
+        constraints: [],
+      },
+      faculty: {
+        skills: [],
+        read_scope: ["graph", "memory.semantic"],  // sensible default
+      },
+      examples: [],
+      rhythm: {
+        trigger_type: a.trigger_type ?? "manual",
+        trigger_config: (() => { try { return JSON.parse(a.trigger_config ?? "{}"); } catch { return {}; } })(),
+        proactive: false,
+      },
+      vitality: { success_count: 0, failure_count: 0 },
+    };
+    upd.run(JSON.stringify(seed), a.id);
+  }
+} catch {}
+
+try {
+  const legacyCrons = db.prepare(
+    "SELECT id, name, cron_pattern FROM user_crons WHERE config_json IN ('{}', '')"
+  ).all() as any[];
+  const upd = db.prepare("UPDATE user_crons SET config_json=? WHERE id=?");
+  for (const c of legacyCrons) {
+    const seed = {
+      purpose: String(c.name ?? ""),
+      voice: "",
+      conditions: [],            // empty = always fire when cron pattern matches
+      vitality: { fire_count: 0, success_count: 0, failure_count: 0 },
+      snooze_until: null,
+    };
+    upd.run(JSON.stringify(seed), c.id);
+  }
+} catch {}
 
 // P3 Skill auto-extraction: record each execute_code success + crystallize repeats
 try { db.exec(`
@@ -696,6 +1082,224 @@ try { db.exec(`
   )
 `); } catch {}
 try { db.exec("CREATE INDEX IF NOT EXISTS idx_hooks_event_enabled ON user_hooks(event, enabled)"); } catch {}
+
+// ── Event-sourced core: scanner_events + derivation_manifest ────────────────
+// The single source of truth. All scanners emit append-only events here;
+// the graph / memories / timeline are derived views. Two invariants:
+//   (1) Append-only: events are never mutated or deleted (enforced by convention —
+//       no UPDATE or DELETE code paths exist outside migrations).
+//   (2) Hash chain: this_hash = sha256(prev_hash || id || payload). Any tamper
+//       breaks the chain at that point and is detected by verifyHashChain().
+// Design decisions:
+//   - seq is monotonic (AUTOINCREMENT) so replay has a total order.
+//   - id is the stable dedup key: sha256 of (source + kind + occurred_at +
+//     stable fields from payload). Re-running a scanner on the same source
+//     data produces the same ids → UNIQUE constraint suppresses duplicates.
+//   - manifest_id captures the scanner's derivation config at ingestion time;
+//     this is how we know *how* to replay an event later. Model upgrades
+//     produce new manifest rows rather than mutating old ones.
+try { db.exec(`CREATE TABLE IF NOT EXISTS derivation_manifest (
+  id TEXT PRIMARY KEY,
+  scanner TEXT NOT NULL,
+  model_id TEXT,
+  prompt_hash TEXT,
+  temperature REAL NOT NULL DEFAULT 0,
+  config_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+)`); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_manifest_scanner ON derivation_manifest(scanner, model_id, prompt_hash)"); } catch {}
+
+try { db.exec(`CREATE TABLE IF NOT EXISTS scanner_events (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  id TEXT NOT NULL UNIQUE,
+  user_id TEXT NOT NULL,
+  source TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  occurred_at TEXT NOT NULL,
+  recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
+  prev_hash TEXT,
+  this_hash TEXT NOT NULL,
+  manifest_id TEXT,
+  FOREIGN KEY (manifest_id) REFERENCES derivation_manifest(id)
+)`); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_events_user_source ON scanner_events(user_id, source, occurred_at DESC)"); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_events_occurred ON scanner_events(user_id, occurred_at DESC)"); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_events_seq ON scanner_events(user_id, seq)"); } catch {}
+
+// ── Contact aggregates — per-scan snapshots for cooling/warming analysis ────
+// Why separate from scanner_events: scanner_events is immutable event stream
+// for replay; contact_aggregates is derived aggregate state per scan — small,
+// indexed for time-series queries. Each row is one (contact, source,
+// direction) snapshot at a specific scan time.
+// Cooling/warming works by comparing the count at snapshot_at=now vs
+// snapshot_at=30-days-ago. If no 30-day-ago snapshot exists, the algorithm
+// falls back to the raw timeline_events count (status quo).
+try { db.exec(`CREATE TABLE IF NOT EXISTS contact_aggregates (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  snapshot_at TEXT NOT NULL DEFAULT (datetime('now')),
+  contact_node_id TEXT,
+  contact_handle TEXT NOT NULL,
+  contact_display_name TEXT,
+  source TEXT NOT NULL,
+  direction TEXT,
+  count_in_window INTEGER NOT NULL,
+  window_days INTEGER NOT NULL,
+  first_at TEXT,
+  last_at TEXT,
+  metadata_json TEXT NOT NULL DEFAULT '{}'
+)`); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_contact_agg_user_time ON contact_aggregates(user_id, snapshot_at DESC)"); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_contact_agg_contact ON contact_aggregates(user_id, contact_node_id, snapshot_at DESC)"); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_contact_agg_handle ON contact_aggregates(user_id, contact_handle, source, direction, snapshot_at DESC)"); } catch {}
+// Idempotency: one snapshot per (contact, source, direction, snapshot_at).
+// Re-running demo seed, or scanner double-firing, returns to the same row via
+// INSERT OR IGNORE. Handle must be non-null; snapshot_at carries the timestamp.
+try { db.exec("CREATE UNIQUE INDEX IF NOT EXISTS ux_contact_agg_key ON contact_aggregates(user_id, contact_handle, source, COALESCE(direction, ''), snapshot_at)"); } catch {}
+
+// ── Long-horizon projects — state file + milestone tracking ─────────────────
+// Anchor's version of Anthropic's claude-progress.txt pattern: a single JSON
+// blob per project that the agent reads at session start and writes at
+// session end. Survives conversation compactions, model swaps, device switches.
+// Keeping state in SQLite rather than the FS means it's backup-covered and
+// sync-covered for free. The JSON shape is intentionally schema-light (stored
+// as TEXT): { goal, milestones: [{ name, status, notes, done_at }], notes,
+// next_check_in, last_updated_by }. Structure evolves as agents need it.
+try { db.exec(`CREATE TABLE IF NOT EXISTS project_state (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  goal TEXT NOT NULL DEFAULT '',
+  state_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'active',
+  next_check_in TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+)`); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_projects_user_status ON project_state(user_id, status)"); } catch {}
+
+// ── Prompt A/B (Sprint A — #7 Prompt experiments) ─────────────────────────
+// Override-on-top-of-hardcoded model: source-code prompts stay as fallback,
+// DB rows define active variants. No experiment row → zero overhead, code
+// path identical to before. Hash-based traffic split (deterministic per key).
+try { db.exec(`
+  CREATE TABLE IF NOT EXISTS experiments (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    key TEXT NOT NULL,                        -- e.g. "decision.system_prompt", "twin.reflect_prompt"
+    description TEXT NOT NULL DEFAULT '',
+    variant_a_value TEXT NOT NULL,            -- the prompt (or any string) for arm A
+    variant_b_value TEXT NOT NULL,            -- the prompt for arm B
+    traffic_split REAL NOT NULL DEFAULT 0.5,  -- fraction sent to A; B gets 1 - split
+    status TEXT NOT NULL DEFAULT 'running',   -- 'running' | 'stopped' | 'promoted_a' | 'promoted_b'
+    success_metric TEXT NOT NULL DEFAULT 'plan_confirmed',  -- which satisfaction_signal type counts as +1
+    started_at TEXT NOT NULL DEFAULT (datetime('now')),
+    ended_at TEXT,
+    winner TEXT,                              -- 'a' | 'b' | NULL
+    notes TEXT NOT NULL DEFAULT ''
+  )
+`); } catch {}
+try { db.exec("CREATE UNIQUE INDEX IF NOT EXISTS ux_experiments_key_running ON experiments(user_id, key) WHERE status='running'"); } catch {}
+
+try { db.exec(`
+  CREATE TABLE IF NOT EXISTS experiment_assignments (
+    id TEXT PRIMARY KEY,
+    experiment_id TEXT NOT NULL,
+    variant TEXT NOT NULL,                    -- 'a' | 'b'
+    context_ref TEXT,                         -- e.g. message_id, session_id — for outcome attribution
+    assigned_at TEXT NOT NULL DEFAULT (datetime('now')),
+    outcome_signal TEXT,                      -- copied from satisfaction_signal type when attributed
+    outcome_value REAL,                       -- the value
+    outcome_at TEXT,
+    FOREIGN KEY (experiment_id) REFERENCES experiments(id) ON DELETE CASCADE
+  )
+`); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_assignments_exp ON experiment_assignments(experiment_id, variant)"); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_assignments_ctxref ON experiment_assignments(context_ref)"); } catch {}
+
+// ── Unified Approval Queue (Sprint B — #4) ────────────────────────────────
+// Mirror table: existing 4 approval mechanisms (L6 gate require_confirmation,
+// bridges/app-approval, cognition/proposals, agent_runs interrupted) keep
+// writing to their own state. Each *also* enqueues a row here so the UI has
+// one inbox. Decisions made here notify the source via 'source_ref_id'.
+try { db.exec(`
+  CREATE TABLE IF NOT EXISTS approval_queue (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    source TEXT NOT NULL,                 -- 'gate' | 'app' | 'proposal' | 'run' | 'step' (future)
+    source_ref_id TEXT NOT NULL,          -- back-pointer (audit_id / app_identifier / proposal_id / run_id)
+    title TEXT NOT NULL,                  -- "Send email to sarah@…", "Approve macOS Notes access", …
+    summary TEXT NOT NULL DEFAULT '',     -- one-line description shown in list
+    detail_json TEXT NOT NULL DEFAULT '{}',  -- arbitrary structured payload for the detail view
+    risk_level TEXT NOT NULL DEFAULT 'medium', -- low|medium|high|critical
+    status TEXT NOT NULL DEFAULT 'pending',    -- pending|approved|rejected|expired|dismissed
+    decided_by TEXT,                      -- 'user' | 'auto_expire' | 'auto_dismiss'
+    decision_reason TEXT,
+    expires_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    decided_at TEXT
+  )
+`); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_approval_user_status ON approval_queue(user_id, status, created_at DESC)"); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_approval_source ON approval_queue(source, source_ref_id)"); } catch {}
+try { db.exec("CREATE UNIQUE INDEX IF NOT EXISTS ux_approval_source_ref ON approval_queue(source, source_ref_id) WHERE status='pending'"); } catch {}
+
+// ── Plan-step Execution Sessions (Phase 1 of #2) ──────────────────────────
+// Compiled plans land here as structured rows. SessionRunner (Phase 2) reads
+// from these tables; for Phase 1 the rows are shadow — old runExecutionReAct
+// still does the actual work, the new tables only enable UI visibility into
+// the structured plan.
+try { db.exec(`
+  CREATE TABLE IF NOT EXISTS action_sessions (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    goal TEXT NOT NULL,
+    source TEXT NOT NULL,                 -- 'advisor_confirm' | 'cron' | 'channel'
+    source_ref_id TEXT,                   -- e.g. originating message id
+    status TEXT NOT NULL DEFAULT 'pending',  -- compiling|pending|running|paused|completed|failed|cancelled
+    current_step_id TEXT,
+    plan_summary TEXT NOT NULL DEFAULT '',
+    compile_error TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )
+`); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_sessions_user_status ON action_sessions(user_id, status, created_at DESC)"); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_sessions_source ON action_sessions(source, source_ref_id)"); } catch {}
+
+try { db.exec(`
+  CREATE TABLE IF NOT EXISTS action_steps (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    step_index INTEGER NOT NULL,
+    name TEXT NOT NULL,                   -- natural language line (user-confirmed)
+    type TEXT NOT NULL,                   -- query|draft|side_effect|approval|verify
+    runtime TEXT NOT NULL,                -- llm|cli|browser|local_app|db|human
+    tool TEXT,                            -- registry tool name; NULL for human/approval
+    input_template_json TEXT NOT NULL DEFAULT '{}', -- mustache refs to prior steps
+    input_resolved_json TEXT,             -- runtime-filled (Phase 2)
+    status TEXT NOT NULL DEFAULT 'pending',  -- pending|running|awaiting_approval|succeeded|failed|skipped|retrying
+    approval_required INTEGER NOT NULL DEFAULT 0,
+    approval_decision TEXT,               -- approved|rejected|NULL
+    output_text TEXT,
+    observation_json TEXT,                -- Phase 3 fills (structured per runtime)
+    verify_rule TEXT,
+    verify_status TEXT NOT NULL DEFAULT 'unknown',  -- unknown|pass|fail
+    verify_evidence TEXT,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    max_retries INTEGER NOT NULL DEFAULT 1,
+    depends_on_step_ids_json TEXT NOT NULL DEFAULT '[]',
+    started_at TEXT,
+    finished_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (session_id) REFERENCES action_sessions(id) ON DELETE CASCADE
+  )
+`); } catch {}
+try { db.exec("CREATE UNIQUE INDEX IF NOT EXISTS ux_steps_session_index ON action_steps(session_id, step_index)"); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_steps_status ON action_steps(status)"); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_steps_session_status ON action_steps(session_id, status)"); } catch {}
 
 seedIfEmpty();
 

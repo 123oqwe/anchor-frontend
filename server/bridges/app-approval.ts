@@ -16,6 +16,7 @@
  */
 import { db, DEFAULT_USER_ID, logExecution } from "../infra/storage/db.js";
 import { bus } from "../orchestration/bus.js";
+import { enqueueApproval } from "../permission/approval-queue.js";
 
 export type ApprovalDecision =
   | { decision: "allow" }
@@ -50,6 +51,18 @@ export function checkAppApproval(appIdentifier: string, scope: "read" | "write" 
       action: { label: "Review", type: "navigate", payload: { path: "/settings" } },
     },
   });
+
+  // Sprint B — #4: dual-write to unified inbox.
+  try {
+    enqueueApproval({
+      source: "app",
+      sourceRefId: `${appIdentifier}::${scope}`,
+      title: `Approve ${appIdentifier} access (${scope})`,
+      summary: `An agent wants to use ${appIdentifier} for the first time`,
+      detail: { appIdentifier, scope },
+      riskLevel: scope === "full" || scope === "write" ? "high" : "medium",
+    });
+  } catch (err) { console.error("[Approval queue] app enqueue failed:", err); }
 
   logExecution("Bridge Dispatcher", `App approval pending: ${appIdentifier} (${scope})`);
 

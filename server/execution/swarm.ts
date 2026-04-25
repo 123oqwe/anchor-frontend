@@ -15,7 +15,20 @@
 import { type EditableStep } from "../orchestration/bus.js";
 import { executeTool, getAllTools, type ToolResult, type ExecutionContext } from "./registry.js";
 import { logExecution } from "../infra/storage/db.js";
-import { text } from "../infra/compute/index.js";
+import { text, object } from "../infra/compute/index.js";
+import { z } from "zod";
+
+const PlanSchema = z.object({
+  phases: z.array(z.object({
+    phase: z.number(),
+    steps: z.array(z.object({
+      step_id: z.number(),
+      tool: z.string().optional(),
+      depends_on_phase: z.number().optional(),
+      reason: z.string().optional(),
+    })).default([]),
+  })).default([]),
+});
 
 // ── Dependency analysis ─────────────────────────────────────────────────────
 
@@ -52,8 +65,8 @@ export async function planExecution(steps: EditableStep[]): Promise<ExecutionPla
   try {
     const toolNames = getAllTools().map(t => `${t.name}: ${t.description}`).join("\n");
 
-    const result = await text({
-      task: "twin_edit_learning", // cheap model
+    const parsed = await object({
+      task: "twin_edit_learning",
       system: `You analyze execution steps and group them into parallel phases.
 Steps in the SAME phase can run simultaneously (they don't depend on each other).
 Steps in LATER phases depend on earlier phases completing first.
@@ -61,30 +74,20 @@ Steps in LATER phases depend on earlier phases completing first.
 Available tools:
 ${toolNames}
 
-Respond ONLY with JSON:
-{
-  "phases": [
-    { "phase": 0, "steps": [{ "step_id": 1, "tool": "write_task", "reason": "why this tool" }] },
-    { "phase": 1, "steps": [{ "step_id": 3, "tool": "read_url", "depends_on_phase": 0 }] }
-  ]
-}
-
 Group independent steps into the same phase for parallel execution.`,
       messages: [{
         role: "user",
         content: `Plan steps:\n${steps.map(s => `${s.id}: ${s.content}`).join("\n")}`,
       }],
+      schema: PlanSchema,
       maxTokens: 400,
     });
 
-    const stripped = result.replace(/```json\s*/g, "").replace(/```/g, "");
-    const parsed = JSON.parse(stripped.match(/\{[\s\S]*\}/)?.[0] ?? "{}");
-
-    if (Array.isArray(parsed.phases) && parsed.phases.length > 0) {
+    if (parsed.phases.length > 0) {
       return {
-        phases: parsed.phases.map((p: any) => ({
-          phaseIndex: p.phase ?? 0,
-          steps: (p.steps ?? []).map((s: any) => {
+        phases: parsed.phases.map(p => ({
+          phaseIndex: p.phase,
+          steps: p.steps.map(s => {
             const originalStep = steps.find(st => st.id === s.step_id) ?? steps[0];
             return {
               step: originalStep,

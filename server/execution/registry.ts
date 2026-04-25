@@ -15,7 +15,7 @@ import { nanoid } from "nanoid";
 
 // ── Tool Definition (MCP-compatible schema) ─────────────────────────────────
 
-export type ToolHandler = "db" | "api" | "browser" | "code" | "internal" | "shell";
+export type ToolHandler = "db" | "api" | "browser" | "code" | "internal" | "shell" | "mcp";
 
 export interface ToolDef {
   name: string;
@@ -30,6 +30,17 @@ export interface ToolDef {
   execute: (input: any, context?: ExecutionContext) => Promise<ToolResult> | ToolResult;
 }
 
+// Phase 3 of #2 — structured observation per runtime.
+// Optional + discriminated union by `runtime` key. Old callers ignoring it
+// remain correct; new SessionRunner verifier hook reads it when present.
+export type ToolObservation =
+  | { runtime: "cli";       stdout?: string; stderr?: string; exitCode?: number }
+  | { runtime: "browser";   finalUrl?: string; statusCode?: number; screenshotPath?: string; domSnippet?: string }
+  | { runtime: "local_app"; providerId?: string; bridgeResponseId?: string; recipient?: string; raw?: any }
+  | { runtime: "db";        table?: string; rowCount?: number; ids?: string[] }
+  | { runtime: "llm";       text?: string; tokensUsed?: number; modelId?: string }
+  | { runtime: "human";     decision?: "approved" | "rejected"; comment?: string; decidedAt?: string };
+
 export interface ToolResult {
   success: boolean;
   output: string;
@@ -39,6 +50,7 @@ export interface ToolResult {
   rollback?: () => Promise<void> | void;  // undo this action
   verifiable?: boolean;  // can this result be verified?
   verifyFn?: () => Promise<boolean>; // returns true if result still valid
+  observation?: ToolObservation;   // Phase 3 of #2 — structured per-runtime evidence
 }
 
 export interface ExecutionContext {
@@ -57,6 +69,11 @@ const registry = new Map<string, ToolDef>();
 export function registerTool(tool: ToolDef): void {
   registry.set(tool.name, tool);
   console.log(`[Registry] Tool registered: ${tool.name} (${tool.handler}/${tool.actionClass})`);
+}
+
+/** Remove a tool by name — used by MCP client when a server disconnects. */
+export function unregisterTool(name: string): boolean {
+  return registry.delete(name);
 }
 
 export function getTool(name: string): ToolDef | undefined {
@@ -105,16 +122,28 @@ export async function executeTool(
   });
 
   if (gate.decision === "deny") {
+    // Capture as implicit feedback — user policy said no to this class of
+    // action. Over time, rejection rate per agent becomes a training signal.
+    import("../cognition/feedback.js").then(m => m.recordToolRejection({
+      runId: context?.runId, agentId: context?.agentId,
+      toolName: name, reason: gate.reason,
+    })).catch(() => {});
     return { success: false, output: `Permission denied: ${gate.reason}`, error: "PERMISSION_DENIED" };
   }
   if (gate.decision === "require_confirmation") {
     return { success: false, output: `Requires confirmation: ${gate.reason}`, error: "NEEDS_CONFIRMATION" };
   }
 
-  // Execute with timing
+  // Execute with timing — wrap in OTel tool span so it nests under any
+  // active agent/LLM span. No-op when OTEL_ENABLED is false.
   const start = Date.now();
+  const { withToolSpan } = await import("../infra/compute/otel.js");
   try {
-    const result = await tool.execute(input, context);
+    const result = await withToolSpan(
+      name,
+      { runId: context?.runId, handler: tool.handler, actionClass: tool.actionClass },
+      async () => tool.execute(input, context),
+    );
     const latency = Date.now() - start;
     logToolCall(name, input, result, latency);
     // L6 trust progression: record success/failure

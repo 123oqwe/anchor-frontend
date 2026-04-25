@@ -12,6 +12,8 @@ export interface CallLogInput {
   providerId: string;
   inputTokens?: number;
   outputTokens?: number;
+  cacheCreationTokens?: number;   // Anthropic prompt cache — tokens written to cache (1.25× input price)
+  cacheReadTokens?: number;       // Anthropic prompt cache — tokens read from cache (0.1× input price)
   latencyMs: number;
   status: "success" | "failed" | "fallback";
   error?: string;
@@ -22,15 +24,27 @@ export interface CallLogInput {
 }
 
 export function logCall(input: CallLogInput): void {
-  const cost = (input.inputTokens && input.outputTokens)
-    ? estimateCost(input.modelId, input.inputTokens, input.outputTokens)
-    : null;
+  // Cost accounting with cache multipliers (Anthropic): cache_write=1.25×,
+  // cache_read=0.1×. We store raw tokens + a composite cost_usd so the DB
+  // reflects real spend, not just base pricing.
+  let cost: number | null = null;
+  if (input.inputTokens !== undefined && input.outputTokens !== undefined) {
+    const baseCost = estimateCost(input.modelId, input.inputTokens, input.outputTokens);
+    const cacheCreate = input.cacheCreationTokens
+      ? estimateCost(input.modelId, input.cacheCreationTokens, 0) * 1.25
+      : 0;
+    const cacheRead = input.cacheReadTokens
+      ? estimateCost(input.modelId, input.cacheReadTokens, 0) * 0.1
+      : 0;
+    cost = baseCost + cacheCreate + cacheRead;
+  }
 
   db.prepare(
     `INSERT INTO llm_calls
      (id, task, capability, model_id, provider_id, input_tokens, output_tokens,
+      cache_creation_tokens, cache_read_tokens,
       cost_usd, latency_ms, status, error, request_preview, response_preview, run_id, agent_name)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     nanoid(),
     input.task,
@@ -39,6 +53,8 @@ export function logCall(input: CallLogInput): void {
     input.providerId,
     input.inputTokens ?? null,
     input.outputTokens ?? null,
+    input.cacheCreationTokens ?? null,
+    input.cacheReadTokens ?? null,
     cost,
     input.latencyMs,
     input.status,

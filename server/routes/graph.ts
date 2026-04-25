@@ -14,7 +14,7 @@ async function getCachedPageRank(): Promise<Map<string, number>> {
   try {
     const { computePageRank } = await import("../graph/math/pagerank.js");
     const allNodes = db.prepare("SELECT id FROM graph_nodes WHERE user_id=?").all(DEFAULT_USER_ID) as any[];
-    const allEdges = db.prepare("SELECT from_node_id as fromNodeId, to_node_id as toNodeId, type, weight FROM graph_edges WHERE user_id=?").all(DEFAULT_USER_ID) as any[];
+    const allEdges = db.prepare("SELECT from_node_id as fromNodeId, to_node_id as toNodeId, type, weight FROM graph_edges WHERE user_id=? AND valid_to IS NULL").all(DEFAULT_USER_ID) as any[];
     const scores = computePageRank({ nodes: allNodes, edges: allEdges });
     prCache = { scores, version, timestamp: Date.now() };
     return scores;
@@ -114,11 +114,18 @@ router.get("/nodes/:id", async (req, res) => {
     "SELECT e.type, e.weight, n.label as fromLabel, n.id as fromId FROM graph_edges e JOIN graph_nodes n ON e.from_node_id=n.id WHERE e.to_node_id=? AND e.user_id=?"
   ).all(req.params.id, DEFAULT_USER_ID);
 
-  // Health (for person nodes — exponential decay)
+  // Health (for person nodes — exponential decay). Prefer edge-level
+  // recency (most recent active edge's valid_from) over node.updatedAt,
+  // because edge history is the truth of "when was this tie last confirmed".
   let health: number | null = null;
   if (node.type === "person" || node.type === "relationship") {
     const { relationshipHealth } = await import("../graph/math/decay.js");
-    const daysSince = (Date.now() - new Date(node.updatedAt).getTime()) / 86400000;
+    const lastEdge = db.prepare(
+      `SELECT MAX(valid_from) as lastAt FROM graph_edges
+       WHERE user_id=? AND valid_to IS NULL AND (from_node_id=? OR to_node_id=?)`
+    ).get(DEFAULT_USER_ID, req.params.id, req.params.id) as any;
+    const anchorAt = lastEdge?.lastAt ?? node.updatedAt;
+    const daysSince = (Date.now() - new Date(anchorAt).getTime()) / 86400000;
     health = Math.round(relationshipHealth(daysSince, 0) * 100);
   }
 
@@ -186,6 +193,201 @@ router.put("/nodes/:id", (req, res) => {
 router.delete("/nodes/:id", (req, res) => {
   db.prepare("DELETE FROM graph_nodes WHERE id=? AND user_id=?").run(req.params.id, DEFAULT_USER_ID);
   res.json({ ok: true });
+});
+
+// Timeline — per-event timestamped rows (calendar meetings, git commits, etc).
+// Query params: from, to (ISO), source, kind (csv), nodeId, limit, order.
+router.get("/timeline", async (req, res) => {
+  try {
+    const { queryTimeline } = await import("../graph/timeline.js");
+    const splitList = (v: any) => typeof v === "string" ? v.split(",").filter(Boolean) : undefined;
+    const events = queryTimeline({
+      from: typeof req.query.from === "string" ? req.query.from : undefined,
+      to: typeof req.query.to === "string" ? req.query.to : undefined,
+      source: splitList(req.query.source) as any,
+      kind: splitList(req.query.kind) as any,
+      nodeId: typeof req.query.nodeId === "string" ? req.query.nodeId : undefined,
+      limit: req.query.limit ? parseInt(String(req.query.limit), 10) : undefined,
+      order: req.query.order === "asc" ? "asc" : "desc",
+    });
+    res.json({ events, count: events.length });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message ?? "timeline query failed" });
+  }
+});
+
+// Timeline day-aggregation — counts per day for heatmap-style views.
+router.get("/timeline/by-day", async (req, res) => {
+  try {
+    const { aggregateTimelineByDay } = await import("../graph/timeline.js");
+    const splitList = (v: any) => typeof v === "string" ? v.split(",").filter(Boolean) : undefined;
+    const buckets = aggregateTimelineByDay({
+      from: typeof req.query.from === "string" ? req.query.from : undefined,
+      to: typeof req.query.to === "string" ? req.query.to : undefined,
+      source: splitList(req.query.source) as any,
+      nodeId: typeof req.query.nodeId === "string" ? req.query.nodeId : undefined,
+    });
+    res.json({ buckets, count: buckets.length });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message ?? "aggregate failed" });
+  }
+});
+
+// What-Changed — bi-temporal diff of edges + nodes over a time window.
+router.get("/changes", async (req, res) => {
+  const from = typeof req.query.from === "string" ? req.query.from : new Date(Date.now() - 7 * 86_400_000).toISOString();
+  const to = typeof req.query.to === "string" ? req.query.to : new Date().toISOString();
+  const nodeId = typeof req.query.nodeId === "string" ? req.query.nodeId : undefined;
+  try {
+    const { computeChanges } = await import("../graph/what-changed.js");
+    res.json(computeChanges({ from, to, nodeId }));
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message ?? "what-changed failed" });
+  }
+});
+
+// Growth card (on-demand) — same computation as the weekly cron, returnable as JSON.
+router.get("/growth/weekly", async (_req, res) => {
+  try {
+    const { generateWeeklyGrowthCard } = await import("../graph/what-changed.js");
+    res.json(generateWeeklyGrowthCard());
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message ?? "growth failed" });
+  }
+});
+
+// Promote a timeline event (typically a weekly growth card) to a permanent
+// milestone node. Creates a `milestone` domain=growth node + links back.
+router.post("/timeline/:id/promote", async (req, res) => {
+  const eventRow = db.prepare(
+    `SELECT id, occurred_at, summary, detail, related_node_ids, metadata
+     FROM timeline_events WHERE id=? AND user_id=?`
+  ).get(req.params.id, DEFAULT_USER_ID) as any;
+  if (!eventRow) return res.status(404).json({ error: "timeline event not found" });
+
+  const { createNode, createEdge } = await import("../graph/writer.js");
+  const id = createNode({
+    domain: "growth",
+    label: (req.body?.label ?? eventRow.summary ?? "Milestone").slice(0, 120),
+    type: "outcome",
+    status: "active",
+    captured: "user_promoted_milestone",
+    detail: `Promoted from timeline event ${eventRow.id} at ${eventRow.occurred_at}.\n${eventRow.detail ?? ""}`,
+  });
+  // Link milestone to each node the underlying event referenced
+  try {
+    const related = JSON.parse(eventRow.related_node_ids ?? "[]");
+    for (const relId of related) {
+      createEdge(id, relId, "contextual", 0.8, JSON.stringify({ source: "milestone_promotion" }));
+    }
+  } catch {}
+  // Mark the source event as promoted in metadata for audit
+  try {
+    const meta = JSON.parse(eventRow.metadata ?? "{}");
+    meta.promoted = true;
+    meta.milestoneNodeId = id;
+    db.prepare("UPDATE timeline_events SET metadata=? WHERE id=?")
+      .run(JSON.stringify(meta), eventRow.id);
+  } catch {}
+  res.json({ milestoneNodeId: id });
+});
+
+// Values — first-class node type for what the user cares about.
+router.get("/values", async (req, res) => {
+  const { getActiveValues } = await import("../graph/reader.js");
+  const limit = Math.min(100, parseInt(String(req.query.limit ?? 50), 10));
+  res.json({ values: getActiveValues(limit) });
+});
+
+router.post("/values", async (req, res) => {
+  const b = req.body ?? {};
+  if (typeof b.label !== "string" || !b.label.trim()) {
+    return res.status(400).json({ error: "label required" });
+  }
+  const { createNode } = await import("../graph/writer.js");
+  const id = createNode({
+    domain: "growth", label: b.label.trim().slice(0, 80),
+    type: "value", status: "active",
+    captured: "user_stated",
+    detail: `source: stated\nconfidence: ${b.confidence ?? 0.95}\nevidence: user-supplied via API`,
+  });
+  res.json({ id });
+});
+
+// Reinforce: user explicitly confirms a value. Bumps updated_at (so it
+// doesn't get archived by any future decay) and marks it stated.
+router.post("/values/:id/reinforce", async (req, res) => {
+  const row = db.prepare(
+    `SELECT id, detail FROM graph_nodes WHERE user_id=? AND id=? AND type='value'`
+  ).get(DEFAULT_USER_ID, req.params.id) as any;
+  if (!row) return res.status(404).json({ error: "value not found" });
+  // Rewrite source to 'stated' and bump confidence
+  const newDetail = `source: stated\nconfidence: 0.95\nevidence: user-reinforced via API\n(previous): ${row.detail?.slice(0, 300) ?? ""}`;
+  db.prepare(
+    `UPDATE graph_nodes SET detail=?, updated_at=datetime('now') WHERE id=? AND user_id=?`
+  ).run(newDetail, req.params.id, DEFAULT_USER_ID);
+  res.json({ ok: true });
+});
+
+// Dismiss a value — user says "no that's not me". Archives the node
+// (doesn't delete — history remains auditable).
+router.post("/values/:id/dismiss", async (req, res) => {
+  const r = db.prepare(
+    `UPDATE graph_nodes SET status='archived', updated_at=datetime('now')
+     WHERE user_id=? AND id=? AND type='value'`
+  ).run(DEFAULT_USER_ID, req.params.id);
+  res.json({ ok: r.changes > 0 });
+});
+
+// Parametric query — agents use this instead of getting full graph dump.
+// Body: GraphQuery (see server/graph/reader.ts for fields).
+router.post("/query", async (req, res) => {
+  try {
+    const { queryGraph } = await import("../graph/reader.js");
+    const nodes = queryGraph(req.body ?? {});
+    res.json({ nodes, count: nodes.length });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message ?? "query failed" });
+  }
+});
+
+// BFS path between two nodes — returns ordered node IDs + labels along the path.
+router.get("/path/:from/:to", async (req, res) => {
+  try {
+    const maxDepth = Math.min(8, Math.max(1, parseInt(String(req.query.maxDepth ?? "4"), 10) || 4));
+    const { getNodePath } = await import("../graph/reader.js");
+    const path = getNodePath(req.params.from, req.params.to, maxDepth);
+    if (!path) { res.json({ path: null, reachable: false }); return; }
+    const labels = db.prepare(
+      `SELECT id, label, type FROM graph_nodes WHERE user_id=? AND id IN (${path.map(() => "?").join(",")})`
+    ).all(DEFAULT_USER_ID, ...path) as any[];
+    const byId = new Map(labels.map(n => [n.id, n]));
+    res.json({
+      reachable: true,
+      hops: path.length - 1,
+      path: path.map(id => byId.get(id) ?? { id, label: "?", type: "?" }),
+    });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message ?? "path lookup failed" });
+  }
+});
+
+// Edge history between two nodes — shows how the relationship evolved.
+// Each row is one version (valid_from → valid_to); valid_to=null means active.
+router.get("/edges/:from/:to/history", (req, res) => {
+  const { from, to } = req.params;
+  const type = typeof req.query.type === "string" ? req.query.type : undefined;
+  const rows = db.prepare(
+    `SELECT e.id, e.type, e.weight, e.metadata,
+            e.valid_from as validFrom, e.valid_to as validTo, e.created_at as createdAt,
+            f.label as fromLabel, t.label as toLabel
+     FROM graph_edges e
+     JOIN graph_nodes f ON e.from_node_id = f.id
+     JOIN graph_nodes t ON e.to_node_id = t.id
+     WHERE e.user_id=? AND e.from_node_id=? AND e.to_node_id=?${type ? " AND e.type=?" : ""}
+     ORDER BY e.valid_from ASC, e.created_at ASC`
+  ).all(...(type ? [DEFAULT_USER_ID, from, to, type] : [DEFAULT_USER_ID, from, to])) as any[];
+  res.json({ versions: rows });
 });
 
 router.get("/decision-today", (_req, res) => {
@@ -329,14 +531,23 @@ router.post("/import", (req, res) => {
 
 // ── Decaying relationships (for Dashboard card) ───────────────────────────
 router.get("/decaying-relationships", async (_req, res) => {
-  const people = db.prepare(
-    "SELECT id, label, detail, updated_at FROM graph_nodes WHERE user_id=? AND type='person' ORDER BY updated_at ASC"
-  ).all(DEFAULT_USER_ID) as any[];
+  // Read "last confirmed" per person from active edges — the MAX(valid_from)
+  // over any edge touching this node tells us when the tie was last asserted
+  // by a scan/inference. Falls back to node.updated_at when no edges exist.
+  const people = db.prepare(`
+    SELECT n.id, n.label, n.detail, n.updated_at,
+           (SELECT MAX(e.valid_from) FROM graph_edges e
+            WHERE e.user_id=n.user_id AND e.valid_to IS NULL
+              AND (e.from_node_id=n.id OR e.to_node_id=n.id)) as lastEdgeAt
+    FROM graph_nodes n
+    WHERE n.user_id=? AND n.type='person'
+  `).all(DEFAULT_USER_ID) as any[];
 
   try {
     const { relationshipHealth, healthToStatus } = await import("../graph/math/decay.js");
     const decaying = people.map((p: any) => {
-      const daysSince = (Date.now() - new Date(p.updated_at).getTime()) / 86400000;
+      const anchorAt = p.lastEdgeAt ?? p.updated_at;
+      const daysSince = (Date.now() - new Date(anchorAt).getTime()) / 86400000;
       const health = relationshipHealth(daysSince, 0);
       return { id: p.id, label: p.label, health: Math.round(health * 100), status: healthToStatus(health), daysSince: Math.round(daysSince), detail: p.detail };
     }).filter(p => p.health < 70).sort((a, b) => a.health - b.health).slice(0, 8);

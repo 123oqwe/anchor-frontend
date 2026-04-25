@@ -14,7 +14,9 @@
  */
 import { db, DEFAULT_USER_ID, logExecution } from "../infra/storage/db.js";
 import { nanoid } from "nanoid";
-import { text } from "../infra/compute/index.js";
+import { object } from "../infra/compute/index.js";
+import { z } from "zod";
+import { pickVariant } from "../orchestration/experiment-runner.js";
 
 const MAX_MEMORIES = 200;
 
@@ -51,45 +53,39 @@ export async function mergeContradictions(): Promise<number> {
       `[${i}] "${m.title}": ${m.content} (confidence: ${m.confidence})`
     ).join("\n");
 
-    const result = await text({
-      task: "twin_edit_learning",
-      system: `You analyze memories for contradictions. Given a list of semantic memories, find pairs that CONTRADICT each other.
+    const baseSystem = `You analyze memories for contradictions. Given a list of semantic memories, find pairs that CONTRADICT each other.
 Two memories contradict if they say opposite things about the same topic.
 "Prefers email" vs "Now prefers Slack" = contradiction.
 "Likes morning meetings" vs "Hired a CTO" = NOT a contradiction (different topics).
-
-Respond ONLY with JSON (no markdown):
-{
-  "contradictions": [
-    { "ids": [0, 3], "resolution": "merged statement that resolves the conflict", "keep_newer": true }
-  ]
-}
-If no contradictions, return: { "contradictions": [] }`,
+If no contradictions, return an empty array.`;
+    const finalSystem = pickVariant({ key: "dream.contradictions_prompt", fallback: baseSystem }).value;
+    const parsed = await object({
+      task: "twin_edit_learning",
+      system: finalSystem,
       messages: [{ role: "user", content: `Memories:\n${memoriesList}` }],
+      schema: z.object({
+        contradictions: z.array(z.object({
+          ids: z.array(z.number()).length(2),
+          resolution: z.string(),
+          keep_newer: z.boolean().default(true),
+        })).default([]),
+      }),
       maxTokens: 400,
     });
-
-    const stripped = result.replace(/```json\s*/g, "").replace(/```/g, "");
-    const parsed = JSON.parse(stripped.match(/\{[\s\S]*\}/)?.[0] ?? "{}");
     let merged = 0;
 
-    if (Array.isArray(parsed.contradictions)) {
-      for (const c of parsed.contradictions) {
-        if (!Array.isArray(c.ids) || c.ids.length !== 2) continue;
-        const [oldIdx, newIdx] = c.ids;
-        const oldMem = semantics[oldIdx];
-        const newMem = semantics[newIdx];
-        if (!oldMem || !newMem) continue;
+    for (const c of parsed.contradictions) {
+      const [oldIdx, newIdx] = c.ids;
+      const oldMem = semantics[oldIdx];
+      const newMem = semantics[newIdx];
+      if (!oldMem || !newMem) continue;
 
-        // Update the newer memory with the merged resolution
-        if (c.resolution) {
-          db.prepare("UPDATE memories SET content=?, updated_at=datetime('now') WHERE id=?")
-            .run(c.resolution.slice(0, 300), newMem.id);
-        }
-        // Delete the older conflicting memory
-        db.prepare("DELETE FROM memories WHERE id=?").run(oldMem.id);
-        merged++;
+      if (c.resolution) {
+        db.prepare("UPDATE memories SET content=?, updated_at=datetime('now') WHERE id=?")
+          .run(c.resolution.slice(0, 300), newMem.id);
       }
+      db.prepare("DELETE FROM memories WHERE id=?").run(oldMem.id);
+      merged++;
     }
     return merged;
   } catch (err: any) {
@@ -201,38 +197,34 @@ export async function createSkillsFromExecutions(): Promise<number> {
   try {
     const execSummary = recentExecs.map((e: any) => e.action).join("\n");
 
-    const result = await text({
+    const parsed = await object({
       task: "twin_edit_learning",
       system: `You analyze execution logs and extract reusable skills/patterns.
 A "skill" is a repeatable sequence of actions the user does regularly.
 If you see a clear pattern (e.g., "follow up with investor" always involves: search → draft email → update graph), create a skill.
-
-Respond ONLY with JSON (no markdown):
-{
-  "skills": [
-    { "name": "Investor Follow-up", "description": "Steps for following up with an investor contact", "steps": ["Search for recent context", "Draft concise email", "Update graph status"], "trigger": "when user mentions follow up with investor" }
-  ]
-}
-If no clear pattern, return: { "skills": [] }`,
+If no clear pattern, return an empty array.`,
       messages: [{ role: "user", content: `Recent executions:\n${execSummary}` }],
+      schema: z.object({
+        skills: z.array(z.object({
+          name: z.string(),
+          description: z.string().default(""),
+          steps: z.array(z.string()),
+          trigger: z.string().default(""),
+        })).default([]),
+      }),
       maxTokens: 400,
     });
-
-    const stripped = result.replace(/```json\s*/g, "").replace(/```/g, "");
-    const parsed = JSON.parse(stripped.match(/\{[\s\S]*\}/)?.[0] ?? "{}");
     let created = 0;
 
-    if (Array.isArray(parsed.skills)) {
-      for (const s of parsed.skills) {
-        if (!s.name || !s.steps) continue;
-        const existing = db.prepare("SELECT id FROM skills WHERE user_id=? AND name=?").get(DEFAULT_USER_ID, s.name);
-        if (existing) continue;
+    for (const s of parsed.skills) {
+      if (!s.name || s.steps.length === 0) continue;
+      const existing = db.prepare("SELECT id FROM skills WHERE user_id=? AND name=?").get(DEFAULT_USER_ID, s.name);
+      if (existing) continue;
 
-        db.prepare(
-          "INSERT INTO skills (id, user_id, name, description, steps, trigger_pattern) VALUES (?,?,?,?,?,?)"
-        ).run(nanoid(), DEFAULT_USER_ID, s.name, s.description ?? "", JSON.stringify(s.steps), s.trigger ?? "");
-        created++;
-      }
+      db.prepare(
+        "INSERT INTO skills (id, user_id, name, description, steps, trigger_pattern) VALUES (?,?,?,?,?,?)"
+      ).run(nanoid(), DEFAULT_USER_ID, s.name, s.description, JSON.stringify(s.steps), s.trigger);
+      created++;
     }
     return created;
   } catch {
@@ -262,40 +254,37 @@ export function enforceCapacity(): number {
   return result.changes;
 }
 
-/** Expire edges where valid_to has passed */
-function expireTemporalEdges(): number {
-  const result = db.prepare(
-    "DELETE FROM graph_edges WHERE valid_to IS NOT NULL AND valid_to < datetime('now')"
-  ).run();
-  return result.changes;
-}
-
 // ── Master Dream function ───────────────────────────────────────────────────
 
 export async function runDream(): Promise<{
   pruned: number; merged: number; promoted: number;
   contradictions: number; skillsCreated: number; capacityRemoved: number;
-  timeNormalized: number; expiredEdges: number;
+  timeNormalized: number;
+  decayed: number; archived: number; arbitrationsQueued: number;
 }> {
   console.log("[Dream] Starting memory consolidation...");
 
+  // Order matters: decay BEFORE prune so low-use memories can fall
+  // through the archive threshold naturally. Arbitration runs AFTER
+  // mergeContradictions so only the high-stakes survivors get queued.
+  const { decayed, archived } = (await import("./lifecycle.js")).applyForgettingCurve();
   const pruned = pruneStale();
   const timeNormalized = normalizeTimeReferences();
   const contradictions = await mergeContradictions();
+  const arbitrationsQueued = await (await import("./lifecycle.js")).detectHighStakesContradictions();
   const promoted = promoteRecurring();
   const skillsCreated = await createSkillsFromExecutions();
   const capacityRemoved = enforceCapacity();
-  const expiredEdges = expireTemporalEdges();
 
-  const stats = { pruned, merged: contradictions, promoted, contradictions, skillsCreated, capacityRemoved, timeNormalized, expiredEdges };
+  const stats = { pruned, merged: contradictions, promoted, contradictions, skillsCreated, capacityRemoved, timeNormalized, decayed, archived, arbitrationsQueued };
 
   // Log the dream run
   db.prepare(
     "INSERT INTO dream_log (id, pruned, merged, promoted, contradictions, skills_created) VALUES (?,?,?,?,?,?)"
   ).run(nanoid(), pruned, contradictions, promoted, contradictions, skillsCreated);
 
-  logExecution("Dream Engine", `Dream complete: pruned=${pruned} merged=${contradictions} promoted=${promoted} skills=${skillsCreated} normalized=${timeNormalized} capacity=${capacityRemoved}`);
-  console.log(`[Dream] Complete: pruned=${pruned}, merged=${contradictions}, promoted=${promoted}, skills=${skillsCreated}, time=${timeNormalized}, capacity=${capacityRemoved}`);
+  logExecution("Dream Engine", `Dream complete: decayed=${decayed} archived=${archived} pruned=${pruned} merged=${contradictions} arbitrations=${arbitrationsQueued} promoted=${promoted} skills=${skillsCreated}`);
+  console.log(`[Dream] Complete: decayed=${decayed}, archived=${archived}, pruned=${pruned}, merged=${contradictions}, arbitrations=${arbitrationsQueued}, promoted=${promoted}, skills=${skillsCreated}, capacity=${capacityRemoved}`);
 
   return stats;
 }

@@ -13,9 +13,48 @@
  * Disagreements still MUST be visible — suppression is contract violation.
  * Achieves ~73% improvement over simple merge (MADS 2026).
  */
-import { text } from "../infra/compute/index.js";
+import { text, object } from "../infra/compute/index.js";
 import { type PlanningPacket } from "./packets.js";
 import { nanoid } from "nanoid";
+import { z } from "zod";
+
+const CriticSchema = z.object({
+  weaknesses: z.array(z.string()).default([]),
+  risks: z.array(z.object({
+    risk: z.string(),
+    severity: z.enum(["low", "medium", "high", "critical"]).default("medium"),
+    mitigation: z.string().nullable().default(null),
+  })).default([]),
+  flawed_assumptions: z.array(z.string()).default([]),
+  missing_information: z.array(z.string()).default([]),
+  alternative_approach: z.string().default(""),
+  overall_assessment: z.enum(["strong", "moderate", "weak"]).default("moderate"),
+});
+
+const JudgeSchema = z.object({
+  ruling: z.enum(["advocate_wins", "critic_wins", "modified_plan"]).default("modified_plan"),
+  reasoning: z.string().default(""),
+  final_plan: z.object({
+    stages: z.array(z.string()).default([]),
+    assumptions: z.array(z.string()).default([]),
+    risks: z.array(z.string()).default([]),
+    recommended: z.boolean().default(true),
+  }).default({ stages: [], assumptions: [], risks: [], recommended: true }),
+  alternative_plan: z.object({
+    stages: z.array(z.string()).default([]),
+    recommended: z.boolean().default(false),
+    rejection_reasons: z.array(z.string()).default([]),
+  }).default({ stages: [], recommended: false, rejection_reasons: [] }),
+  unresolved_questions: z.array(z.string()).default([]),
+  debate_summary: z.array(z.object({
+    topic: z.string().default(""),
+    advocate_said: z.string().default(""),
+    critic_said: z.string().default(""),
+    judge_ruled: z.string().default(""),
+    resolved: z.boolean().default(false),
+  })).default([]),
+  confidence: z.number().min(0).max(1).default(0.7),
+});
 
 // ── Activation check ────────────────────────────────────────────────────────
 
@@ -72,9 +111,11 @@ Respond with JSON (no markdown):
   console.log("[Swarm] Advocate done.");
 
   // ── Role 2: Critic — attack every weakness ────────────────────────
-  const criticOutput = await text({
-    task: "decision",
-    system: `You are the CRITIC in a structured debate. The Advocate proposed an approach.
+  let criticParsed: z.infer<typeof CriticSchema> = CriticSchema.parse({});
+  try {
+    criticParsed = await object({
+      task: "decision",
+      system: `You are the CRITIC in a structured debate. The Advocate proposed an approach.
 Your role: find EVERY weakness, risk, blind spot, and flawed assumption.
 Be rigorous. Don't be polite. Your job is to stress-test the plan.
 Point out what could go wrong, what's missing, what's naive.
@@ -83,27 +124,25 @@ Advocate's argument:
 ${advocateOutput.slice(0, 1000)}
 
 Memory context:
-${memoryContext.slice(0, 400)}
-
-Respond with JSON (no markdown):
-{
-  "weaknesses": ["weakness 1", "weakness 2", ...],
-  "risks": [{ "risk": "description", "severity": "low|medium|high|critical", "mitigation": "possible fix" }],
-  "flawed_assumptions": ["assumption the advocate made that may be wrong", ...],
-  "missing_information": ["what we don't know but need to", ...],
-  "alternative_approach": "brief description of a better alternative if this plan is fundamentally flawed",
-  "overall_assessment": "strong|moderate|weak"
-}`,
-    messages: [{ role: "user", content: problem }],
-    maxTokens: 800,
-  });
+${memoryContext.slice(0, 400)}`,
+      messages: [{ role: "user", content: problem }],
+      schema: CriticSchema,
+      maxTokens: 800,
+    });
+  } catch (err: any) {
+    console.error("[Swarm] Critic structured-output failed:", err.message);
+  }
+  const criticOutput = JSON.stringify(criticParsed);
 
   console.log("[Swarm] Critic done.");
 
   // ── Role 3: Judge — weigh argument quality, make ruling ───────────
-  const judgeOutput = await text({
-    task: "decision",
-    system: `You are the JUDGE in a structured debate. You have heard the Advocate and the Critic.
+  let parsed: z.infer<typeof JudgeSchema> = JudgeSchema.parse({});
+  let judgeFailed = false;
+  try {
+    parsed = await object({
+      task: "decision",
+      system: `You are the JUDGE in a structured debate. You have heard the Advocate and the Critic.
 Your role: make a RULING based on argument quality, not compromise.
 
 RULES:
@@ -117,74 +156,45 @@ Advocate's case:
 ${advocateOutput.slice(0, 800)}
 
 Critic's rebuttal:
-${criticOutput.slice(0, 800)}
-
-Respond with JSON (no markdown):
-{
-  "ruling": "advocate_wins|critic_wins|modified_plan",
-  "reasoning": "why this ruling based on argument quality",
-  "final_plan": {
-    "stages": ["step 1", "step 2", ...],
-    "assumptions": ["assumption 1", ...],
-    "risks": ["remaining risk after debate", ...],
-    "recommended": true
-  },
-  "alternative_plan": {
-    "stages": ["alt step 1", ...],
-    "recommended": false,
-    "rejection_reasons": ["why not"]
-  },
-  "unresolved_questions": ["things user needs to clarify", ...],
-  "debate_summary": [
-    { "topic": "key point of contention", "advocate_said": "...", "critic_said": "...", "judge_ruled": "...", "resolved": true|false }
-  ],
-  "confidence": 0.0-1.0
-}`,
-    messages: [{ role: "user", content: problem }],
-    maxTokens: 1000,
-  });
+${criticOutput.slice(0, 800)}`,
+      messages: [{ role: "user", content: problem }],
+      schema: JudgeSchema,
+      maxTokens: 1000,
+    });
+  } catch (err: any) {
+    console.error("[Swarm] Judge structured-output failed:", err.message);
+    judgeFailed = true;
+  }
 
   console.log("[Swarm] Judge done.");
 
-  // ── Parse and assemble PlanningPacket ─────────────────────────────
+  // ── Assemble PlanningPacket ───────────────────────────────────────
   let packet: PlanningPacket;
-  try {
-    const stripped = judgeOutput.replace(/```json\s*/g, "").replace(/```/g, "");
-    let jsonStr = stripped.match(/\{[\s\S]*\}/)?.[0] ?? "{}";
-    // Auto-repair truncated JSON
-    if (!jsonStr.trim().endsWith("}")) {
-      const openB = (jsonStr.match(/\[/g) || []).length - (jsonStr.match(/\]/g) || []).length;
-      const openC = (jsonStr.match(/\{/g) || []).length - (jsonStr.match(/\}/g) || []).length;
-      jsonStr += "]".repeat(Math.max(0, openB)) + "}".repeat(Math.max(0, openC));
-    }
-    let parsed: any;
-    try { parsed = JSON.parse(jsonStr); } catch {
-      try { parsed = JSON.parse(jsonStr.replace(/,\s*\]/, "]").replace(/,\s*\}/, "}")); } catch { parsed = {}; }
-    }
-
-    // Parse critic for risk map
-    let criticParsed: any = {};
-    try {
-      const cs = criticOutput.replace(/```json\s*/g, "").replace(/```/g, "");
-      criticParsed = JSON.parse(cs.match(/\{[\s\S]*\}/)?.[0] ?? "{}");
-    } catch {}
-
-    const plans = [];
-    if (parsed.final_plan) {
+  if (judgeFailed) {
+    packet = {
+      candidatePlans: [],
+      riskConflictMap: [],
+      unresolvedQuestions: ["Swarm debate failed — manual planning needed"],
+      plannerDisagreements: [],
+      boundaryClassification: "advisory_only",
+    };
+  } else {
+    const plans: PlanningPacket["candidatePlans"] = [];
+    if (parsed.final_plan.stages.length > 0) {
       plans.push({
         planId: nanoid(8),
-        stages: parsed.final_plan.stages ?? [],
+        stages: parsed.final_plan.stages,
         dependencies: [],
-        assumptions: parsed.final_plan.assumptions ?? [],
-        risks: parsed.final_plan.risks ?? [],
+        assumptions: parsed.final_plan.assumptions,
+        risks: parsed.final_plan.risks,
         conflicts: [],
         recommended: true,
       });
     }
-    if (parsed.alternative_plan?.stages?.length > 0) {
+    if (parsed.alternative_plan.stages.length > 0) {
       plans.push({
         planId: nanoid(8),
-        stages: parsed.alternative_plan.stages ?? [],
+        stages: parsed.alternative_plan.stages,
         dependencies: [],
         assumptions: [],
         risks: [],
@@ -196,30 +206,22 @@ Respond with JSON (no markdown):
 
     packet = {
       candidatePlans: plans,
-      riskConflictMap: (criticParsed.risks ?? []).map((r: any) => ({
+      riskConflictMap: criticParsed.risks.map(r => ({
         riskId: nanoid(6),
-        severity: r.severity ?? "medium",
-        mitigation: r.mitigation ?? null,
+        severity: r.severity,
+        mitigation: r.mitigation ?? undefined,   // PlanningPacket type uses optional, not nullable
       })),
-      unresolvedQuestions: parsed.unresolved_questions ?? [],
-      plannerDisagreements: (parsed.debate_summary ?? []).map((d: any) => ({
-        topic: d.topic ?? "",
+      unresolvedQuestions: parsed.unresolved_questions,
+      plannerDisagreements: parsed.debate_summary.map(d => ({
+        topic: d.topic,
         positions: [
-          { role: "advocate", position: d.advocate_said ?? "" },
-          { role: "critic", position: d.critic_said ?? "" },
-          { role: "judge", position: d.judge_ruled ?? "" },
+          { role: "advocate", position: d.advocate_said },
+          { role: "critic", position: d.critic_said },
+          { role: "judge", position: d.judge_ruled },
         ],
-        resolved: d.resolved ?? false,
+        resolved: d.resolved,
       })),
       boundaryClassification: "draft_candidate",
-    };
-  } catch {
-    packet = {
-      candidatePlans: [],
-      riskConflictMap: [],
-      unresolvedQuestions: ["Swarm debate failed — manual planning needed"],
-      plannerDisagreements: [],
-      boundaryClassification: "advisory_only",
     };
   }
 

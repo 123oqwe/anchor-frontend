@@ -15,7 +15,7 @@ export interface StepChange {
 }
 
 export type AnchorEvent =
-  | { type: "USER_CONFIRMED"; payload: { original_steps: EditableStep[]; user_steps: EditableStep[]; changes: StepChange[] } }
+  | { type: "USER_CONFIRMED"; payload: { original_steps: EditableStep[]; user_steps: EditableStep[]; changes: StepChange[]; sessionId?: string } }
   | { type: "EXECUTION_DONE"; payload: { steps_result: { step: string; status: string; result: string }[]; plan_summary: string } }
   | { type: "TWIN_UPDATED";  payload: { insight: string } }
   | { type: "GRAPH_UPDATED"; payload: { nodeId: string; status: string; label: string } }
@@ -33,7 +33,11 @@ export type AnchorEvent =
   // OPT-1 Gap B: dev tool write proposal awaiting user approval
   | { type: "PROPOSAL_PENDING"; payload: { id: string; kind: string; path?: string; agentName?: string; deltaLines: number } }
   // Portrait streaming: Oracle Council progressive reveal
-  | { type: "PORTRAIT_PROGRESS"; payload: { phase: "profile" | "oracle" | "compass" | "done"; oracle?: string; narrative?: string; questions?: string[]; icon?: string; durationMs?: number; compass?: any } };
+  | { type: "PORTRAIT_PROGRESS"; payload: { phase: "profile" | "oracle" | "compass" | "done"; oracle?: string; narrative?: string; questions?: string[]; icon?: string; durationMs?: number; compass?: any } }
+  // Sprint B — #4: unified approval inbox decision
+  | { type: "APPROVAL_DECIDED"; payload: { id: string; source: string; sourceRefId: string; approved: boolean; reason?: string } }
+  // Phase 2 of #2 — per-step progress (UI live-updates)
+  | { type: "SESSION_STEP_PROGRESS"; payload: { sessionId: string; stepId: string; stepIndex: number; status: string; tool: string | null; runtime: string } };
 
 class AnchorBus extends EventEmitter {
   publish(data: AnchorEvent) {

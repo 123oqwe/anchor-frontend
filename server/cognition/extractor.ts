@@ -11,9 +11,31 @@
  * - Debounce: batches messages within 3s window
  * - Update matching uses fuzzy LIKE, not exact match
  */
-import { text } from "../infra/compute/index.js";
+import { object } from "../infra/compute/index.js";
 import { createNode, createEdge, updateNodeStatus } from "../graph/writer.js";
 import { db, DEFAULT_USER_ID, logExecution } from "../infra/storage/db.js";
+import { z } from "zod";
+import { pickVariant } from "../orchestration/experiment-runner.js";
+
+const ExtractionSchema = z.object({
+  new_nodes: z.array(z.object({
+    label: z.string(),
+    type: z.string(),
+    domain: z.string(),
+    status: z.string().optional(),
+    detail: z.string().optional(),
+  })).default([]),
+  updates: z.array(z.object({
+    label: z.string(),
+    new_status: z.string().optional(),
+    new_detail: z.string().optional(),
+  })).default([]),
+  new_edges: z.array(z.object({
+    from_label: z.string(),
+    to_label: z.string(),
+    type: z.string(),
+  })).default([]),
+});
 
 // ── Debounce: batch messages within 3s window ───────────────────────────────
 
@@ -140,104 +162,83 @@ async function doExtraction(combinedMessage: string): Promise<void> {
       ? existingEdges.map(e => `${e.f} —[${e.type}]→ ${e.t}`).join("\n")
       : "(no edges)";
 
-    const prompt = EXTRACTION_PROMPT
+    // Sprint A — #7: prompt experiment override on the EXTRACTION_PROMPT
+    // template before placeholder substitution.
+    const promptTemplate = pickVariant({
+      key: "extractor.graph_extraction_prompt",
+      fallback: EXTRACTION_PROMPT,
+    }).value;
+    const prompt = promptTemplate
       .replace("{EXISTING_NODES}", existingText)
       .replace("{EXISTING_EDGES}", edgesText)
       .replace("{MESSAGE}", combinedMessage.slice(0, 3000));
 
-    const result = await text({
-      task: "graph_extraction",
-      system: prompt,
-      messages: [{ role: "user", content: "Extract graph information." }],
-      maxTokens: 1200,
-    });
-
-    // Strip markdown fences if present, then extract JSON
-    const stripped = result.replace(/```json\s*/g, "").replace(/```\s*/g, "");
-    let jsonStr = stripped.match(/\{[\s\S]*\}/)?.[0];
-    if (!jsonStr) return;
-
-    // Fix truncated JSON: if it doesn't end with }, try closing brackets
-    if (!jsonStr.trim().endsWith("}")) {
-      const openBrackets = (jsonStr.match(/\[/g) || []).length - (jsonStr.match(/\]/g) || []).length;
-      const openBraces = (jsonStr.match(/\{/g) || []).length - (jsonStr.match(/\}/g) || []).length;
-      jsonStr += "]".repeat(Math.max(0, openBrackets)) + "}".repeat(Math.max(0, openBraces));
-    }
-
-    let parsed: any;
+    let parsed: z.infer<typeof ExtractionSchema>;
     try {
-      parsed = JSON.parse(jsonStr);
-    } catch {
-      // Try to extract partial results by cutting at last valid array element
-      try {
-        const trimmed = jsonStr.replace(/,\s*\]/, "]").replace(/,\s*\}/, "}");
-        parsed = JSON.parse(trimmed);
-      } catch {
-        console.error("[Observation Agent] JSON parse failed even after repair");
-        return;
-      }
+      parsed = await object({
+        task: "graph_extraction",
+        system: prompt,
+        messages: [{ role: "user", content: "Extract graph information." }],
+        schema: ExtractionSchema,
+        maxTokens: 1200,
+      });
+    } catch (err: any) {
+      console.error("[Observation Agent] structured extraction failed:", err?.message);
+      return;
     }
 
     // ── Create new nodes (with fuzzy dedup) ─────────────────────────────
     let nodesCreated = 0;
     const newNodeIds: Record<string, string> = {};
-    if (Array.isArray(parsed.new_nodes)) {
-      for (const n of parsed.new_nodes) {
-        if (!n.label || !n.type || !n.domain) continue;
-        // Enforce ≤40 char label
-        const label = n.label.slice(0, 40).trim();
-        // Fuzzy dedup
-        const existingNode = fuzzyFindNode(label);
-        if (existingNode) {
-          newNodeIds[label] = existingNode.id;
-          newNodeIds[n.label] = existingNode.id;
-          continue;
-        }
-        const id = createNode({
-          domain: n.domain,
-          label,
-          type: n.type,
-          status: n.status ?? "active",
-          captured: "Extracted from conversation",
-          detail: (n.detail ?? "").slice(0, 200),
-        });
-        newNodeIds[label] = id;
-        newNodeIds[n.label] = id;
-        nodesCreated++;
+    for (const n of parsed.new_nodes) {
+      if (!n.label || !n.type || !n.domain) continue;
+      const label = n.label.slice(0, 40).trim();
+      const existingNode = fuzzyFindNode(label);
+      if (existingNode) {
+        newNodeIds[label] = existingNode.id;
+        newNodeIds[n.label] = existingNode.id;
+        continue;
       }
+      const id = createNode({
+        domain: n.domain,
+        label,
+        type: n.type,
+        status: n.status ?? "active",
+        captured: "Extracted from conversation",
+        detail: (n.detail ?? "").slice(0, 200),
+      });
+      newNodeIds[label] = id;
+      newNodeIds[n.label] = id;
+      nodesCreated++;
     }
 
     // ── Update existing nodes (fuzzy match) ─────────────────────────────
     let nodesUpdated = 0;
-    if (Array.isArray(parsed.updates)) {
-      for (const u of parsed.updates) {
-        if (!u.label) continue;
-        const node = fuzzyFindNode(u.label);
-        if (node) {
-          if (u.new_status) updateNodeStatus(node.id, u.new_status);
-          if (u.new_detail) {
-            db.prepare("UPDATE graph_nodes SET detail=?, updated_at=datetime('now') WHERE id=?")
-              .run(u.new_detail.slice(0, 200), node.id);
-          }
-          nodesUpdated++;
+    for (const u of parsed.updates) {
+      if (!u.label) continue;
+      const node = fuzzyFindNode(u.label);
+      if (node) {
+        if (u.new_status) updateNodeStatus(node.id, u.new_status);
+        if (u.new_detail) {
+          db.prepare("UPDATE graph_nodes SET detail=?, updated_at=datetime('now') WHERE id=?")
+            .run(u.new_detail.slice(0, 200), node.id);
         }
+        nodesUpdated++;
       }
     }
 
     // ── Create edges (fuzzy match both ends) ────────────────────────────
     let edgesCreated = 0;
-    if (Array.isArray(parsed.new_edges)) {
-      for (const e of parsed.new_edges) {
-        if (!e.from_label || !e.to_label || !e.type) continue;
-        const fromNode = newNodeIds[e.from_label] ? { id: newNodeIds[e.from_label] } : fuzzyFindNode(e.from_label);
-        const toNode = newNodeIds[e.to_label] ? { id: newNodeIds[e.to_label] } : fuzzyFindNode(e.to_label);
-        if (fromNode && toNode && fromNode.id !== toNode.id) {
-          const dup = db.prepare("SELECT id FROM graph_edges WHERE user_id=? AND from_node_id=? AND to_node_id=? AND type=?")
-            .get(DEFAULT_USER_ID, fromNode.id, toNode.id, e.type);
-          if (!dup) {
-            createEdge(fromNode.id, toNode.id, e.type);
-            edgesCreated++;
-          }
+    for (const e of parsed.new_edges) {
+      if (!e.from_label || !e.to_label || !e.type) continue;
+      const fromNode = newNodeIds[e.from_label] ? { id: newNodeIds[e.from_label] } : fuzzyFindNode(e.from_label);
+      const toNode = newNodeIds[e.to_label] ? { id: newNodeIds[e.to_label] } : fuzzyFindNode(e.to_label);
+      if (fromNode && toNode && fromNode.id !== toNode.id) {
+        const dup = db.prepare("SELECT id FROM graph_edges WHERE user_id=? AND from_node_id=? AND to_node_id=? AND type=?")
+          .get(DEFAULT_USER_ID, fromNode.id, toNode.id, e.type);
+        if (!dup) {
+          createEdge(fromNode.id, toNode.id, e.type);
+          edgesCreated++;
         }
       }
     }

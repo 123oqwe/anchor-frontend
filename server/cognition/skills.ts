@@ -16,9 +16,10 @@
  */
 import { db, DEFAULT_USER_ID } from "../infra/storage/db.js";
 import { nanoid } from "nanoid";
-import { text } from "../infra/compute/index.js";
+import { object } from "../infra/compute/index.js";
 import type { DecisionResult } from "./decision.js";
 import { getConfig } from "./diagnostic.js";
+import { z } from "zod";
 
 export interface SkillMatch {
   skillId: string;
@@ -108,20 +109,20 @@ export async function buildSkillBasedPlan(
 
   // Use cheap model to adapt steps to this specific request
   try {
-    const adapted = await text({
+    const parsed = await object({
       task: "twin_edit_learning",
       system: `You are adapting a learned skill to a specific request. The skill "${match.name}" has these template steps:
 ${match.steps.map((s, i) => `${i + 1}. ${s}`).join("\n")}
 
-Adapt these steps to the user's specific request. Keep the same structure but customize details.
-Respond ONLY with JSON (no markdown): {"steps": ["adapted step 1", "adapted step 2", ...], "summary": "one sentence summary"}`,
+Adapt these steps to the user's specific request. Keep the same structure but customize details.`,
       messages: [{ role: "user", content: userMessage }],
+      schema: z.object({
+        steps: z.array(z.string()),
+        summary: z.string(),
+      }),
       maxTokens: 300,
     });
-
-    const stripped = adapted.replace(/```json\s*/g, "").replace(/```/g, "");
-    const parsed = JSON.parse(stripped.match(/\{[\s\S]*\}/)?.[0] ?? "{}");
-    const steps = Array.isArray(parsed.steps) ? parsed.steps : match.steps;
+    const steps = parsed.steps.length > 0 ? parsed.steps : match.steps;
     const summary = parsed.summary || `Using skill: ${match.name}`;
 
     return {
@@ -224,26 +225,27 @@ export async function tryCrystallizeSkill(
 
   // Use LLM to detect if there's a repeatable pattern
   try {
-    const result = await text({
+    const parsed = await object({
       task: "twin_edit_learning",
       system: `You analyze confirmed plans to detect reusable patterns.
 Given these recently confirmed plans, determine if there's a common pattern worth saving as a "skill" (a reusable template).
 A skill must: appear in 3+ plans, have clear trigger conditions, have consistent steps.
-
-Respond ONLY with JSON:
-{"detected": true/false, "name": "Skill Name", "steps": ["step1", "step2"], "trigger": "when user says X or mentions Y", "confidence": 0.0-1.0}
-If no pattern: {"detected": false}`,
+If no pattern, set "detected" to false and leave other fields empty.`,
       messages: [{
         role: "user",
         content: `Recent confirmed plans:\n${planSteps.map((steps, i) => `Plan ${i + 1}: ${steps.join(" → ")}`).join("\n")}`,
       }],
+      schema: z.object({
+        detected: z.boolean(),
+        name: z.string().default(""),
+        steps: z.array(z.string()).default([]),
+        trigger: z.string().default(""),
+        confidence: z.number().min(0).max(1).default(0.6),
+      }),
       maxTokens: 300,
     });
 
-    const stripped = result.replace(/```json\s*/g, "").replace(/```/g, "");
-    const parsed = JSON.parse(stripped.match(/\{[\s\S]*\}/)?.[0] ?? "{}");
-
-    if (!parsed.detected || !parsed.name || !parsed.steps) return null;
+    if (!parsed.detected || !parsed.name || parsed.steps.length === 0) return null;
 
     // Check if skill already exists
     const existing = db.prepare("SELECT id FROM skills WHERE user_id=? AND name=?").get(DEFAULT_USER_ID, parsed.name);
@@ -253,7 +255,7 @@ If no pattern: {"detected": false}`,
     db.prepare(
       "INSERT INTO skills (id, user_id, name, description, steps, trigger_pattern, confidence, source) VALUES (?,?,?,?,?,?,?,?)"
     ).run(skillId, DEFAULT_USER_ID, parsed.name, `Auto-crystallized from ${planSteps.length} confirmed plans`,
-      JSON.stringify(parsed.steps), parsed.trigger ?? "", parsed.confidence ?? 0.6, "behavior_crystallization");
+      JSON.stringify(parsed.steps), parsed.trigger, parsed.confidence, "behavior_crystallization");
 
     console.log(`[Skills] Crystallized new skill: "${parsed.name}" (${parsed.steps.length} steps)`);
     return skillId;

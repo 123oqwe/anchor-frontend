@@ -18,6 +18,7 @@ import path from "path";
 import os from "os";
 import { getTokens } from "../token-store.js";
 import { DEFAULT_USER_ID } from "../../infra/storage/db.js";
+import { shadowEmit } from "../../infra/storage/scanner-events.js";
 
 const HOME = os.homedir();
 
@@ -280,7 +281,7 @@ export async function scanMediaUnified(): Promise<MediaUnifiedSummary> {
     !spotifyToken && sources.find(s => s.appId === "spotify") ? "Spotify OAuth: not granted (would unlock listening history)" : "",
   ].filter(Boolean).join(". ");
 
-  return {
+  const result: MediaUnifiedSummary = {
     sources,
     musicSplit: {
       westShare: Math.round(westShare * 100) / 100,
@@ -292,6 +293,22 @@ export async function scanMediaUnified(): Promise<MediaUnifiedSummary> {
     signals,
     coverage,
   };
+
+  shadowEmit({
+    scanner: "media-unified",
+    source: "manual",
+    kind: "media_scan_summary",
+    stableFields: { scanDay: new Date().toISOString().slice(0, 10) },
+    payload: {
+      sourceCount: result.sources.length,
+      totalActive: result.totalActive,
+      primaryMusicSource: result.primaryMusicSource,
+      musicSplit: result.musicSplit,
+      sources: result.sources.map(s => ({ id: s.appId, active: s.active, tier: s.tier, category: s.category, region: s.region })),
+    },
+  });
+
+  return result;
 }
 
 // ── Render ──────────────────────────────────────────────────────────────

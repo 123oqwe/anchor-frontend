@@ -25,6 +25,7 @@ import path from "path";
 import os from "os";
 import { getTokens } from "../token-store.js";
 import { DEFAULT_USER_ID } from "../../infra/storage/db.js";
+import { shadowEmit } from "../../infra/storage/scanner-events.js";
 
 const HOME = os.homedir();
 
@@ -306,7 +307,7 @@ export async function scanCodeUnified(): Promise<CodeUnifiedSummary> {
     ghToken ? "GitHub OAuth: granted (API data not yet integrated)" : "GitHub OAuth: not granted — public PR / review data missing",
   ].join(". ");
 
-  return {
+  const result: CodeUnifiedSummary = {
     sources: { localRepos: repos.length, githubOAuth: !!ghToken },
     totalCommitsLast30d: totalCommits30,
     activeRepos: active.length,
@@ -321,6 +322,28 @@ export async function scanCodeUnified(): Promise<CodeUnifiedSummary> {
     signals,
     coverage,
   };
+
+  shadowEmit({
+    scanner: "code-unified",
+    source: "code",
+    kind: "code_scan_summary",
+    stableFields: { scanDay: new Date().toISOString().slice(0, 10) },
+    payload: {
+      totalCommitsLast30d: result.totalCommitsLast30d,
+      activeRepos: result.activeRepos,
+      dormantRepos: result.dormantRepos,
+      abandonedRepos: result.abandonedRepos,
+      primaryRepo: result.primaryRepo,
+      peakHourGlobal: result.peakHourGlobal,
+      peakDayGlobal: result.peakDayGlobal,
+      topLanguages: result.topLanguages?.slice(0, 8),
+      topMessageThemes: result.topMessageThemes?.slice(0, 10),
+      githubOAuth: result.sources.githubOAuth,
+      localRepos: result.sources.localRepos,
+    },
+  });
+
+  return result;
 }
 
 // ── Render ──────────────────────────────────────────────────────────────

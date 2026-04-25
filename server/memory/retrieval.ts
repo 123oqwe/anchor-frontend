@@ -20,6 +20,13 @@ export interface MemoryRecord {
   source: string;
   confidence: number;
   createdAt: string;
+  /** Bi-temporal — when the FACT became true in the world (not when learned).
+   *  Backfilled to created_at on legacy rows; new rows set explicitly. */
+  validFrom?: string | null;
+  /** When the fact stopped being true. NULL = still valid. */
+  validTo?: string | null;
+  /** When Anchor INGESTED the memory (transaction time). */
+  recordedAt?: string | null;
   relevanceScore?: number;  // computed at retrieval time
 }
 
@@ -69,7 +76,9 @@ function extractKeywords(text: string): string[] {
  */
 export function getForDecision(userMessage: string, limit = 12): MemoryRecord[] {
   const allMems = db.prepare(
-    "SELECT id, type, title, content, tags, source, confidence, created_at as createdAt FROM memories WHERE user_id=? ORDER BY created_at DESC LIMIT 100"
+    // Filter archived — forgetting-curve'd memories stay queryable via getByClass
+    // or direct id lookup but don't flood the Decision Agent's default context.
+    "SELECT id, type, title, content, tags, source, confidence, created_at as createdAt, valid_from as validFrom, valid_to as validTo, recorded_at as recordedAt FROM memories WHERE user_id=? AND status='active' ORDER BY created_at DESC LIMIT 100"
   ).all(DEFAULT_USER_ID) as any[];
 
   const keywords = extractKeywords(userMessage);
@@ -84,7 +93,86 @@ export function getForDecision(userMessage: string, limit = 12): MemoryRecord[] 
     .sort((a, b) => (b.relevanceScore ?? 0) - (a.relevanceScore ?? 0))
     .slice(0, limit);
 
+  touchAccessFireAndForget(scored.map(m => m.id));
   return scored;
+}
+
+/**
+ * Hybrid retrieval: keyword scoring (sparse) + semantic embedding (dense) fused via RRF.
+ * Reciprocal Rank Fusion collapses two independent ranked lists without needing
+ * score normalization — rank position is the only signal. k=60 is the canonical
+ * smoothing constant from the original Cormack+Clarke 2009 paper.
+ *
+ * Falls back to keyword-only if RAG is unavailable (no embedding provider key,
+ * no embeddings yet stored, or embed() throws). Anchor must never be bricked by
+ * a missing API key.
+ */
+/**
+ * Record that these memories were read. The Ebbinghaus forgetting curve uses
+ * last_accessed_at as its decay anchor — recalling a memory resets the clock,
+ * so "used memories stay sharp, unused ones fade." Called fire-and-forget
+ * from the retrieval read path; a missing update never hurts correctness.
+ */
+function touchAccessFireAndForget(memoryIds: string[]): void {
+  if (memoryIds.length === 0) return;
+  // Dynamic import + background-fire avoids adding latency to read path;
+  // lifecycle.ts imports retrieval.ts for some ops, avoiding circularity.
+  import("./lifecycle.js")
+    .then(m => memoryIds.forEach(id => m.recordMemoryAccess(id)))
+    .catch(() => {});
+}
+
+export async function getForDecisionHybrid(userMessage: string, limit = 12): Promise<MemoryRecord[]> {
+  const keywordTop = getForDecision(userMessage, 30);
+
+  let semanticIds: string[] = [];
+  try {
+    const { ragRetrieve } = await import("../infra/rag/index.js");
+    const sem = await ragRetrieve(userMessage, 30);
+    semanticIds = sem.map(r => r.id);
+  } catch {
+    // RAG unavailable — fall through to keyword-only
+  }
+
+  if (semanticIds.length === 0) return keywordTop.slice(0, limit);
+
+  // RRF fusion: both lists contribute 1/(k + rank) per appearance
+  const RRF_K = 60;
+  const scores = new Map<string, number>();
+  keywordTop.forEach((m, idx) => {
+    scores.set(m.id, (scores.get(m.id) ?? 0) + 1 / (RRF_K + idx + 1));
+  });
+  semanticIds.forEach((id, idx) => {
+    scores.set(id, (scores.get(id) ?? 0) + 1 / (RRF_K + idx + 1));
+  });
+
+  const ranked = Array.from(scores.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, limit);
+  const topIds = ranked.map(e => e[0]);
+  if (topIds.length === 0) return [];
+
+  const placeholders = topIds.map(() => "?").join(",");
+  const rows = db.prepare(
+    `SELECT id, type, title, content, tags, source, confidence, created_at as createdAt,
+            valid_from as validFrom, valid_to as validTo, recorded_at as recordedAt
+     FROM memories WHERE id IN (${placeholders}) AND user_id=? AND status='active'`
+  ).all(...topIds, DEFAULT_USER_ID) as any[];
+
+  const byId = new Map(rows.map(r => [r.id, r]));
+  const ordered = topIds
+    .map(id => byId.get(id))
+    .filter(Boolean)
+    .map(r => ({
+      ...r,
+      tags: safeParseTags(r.tags),
+      relevanceScore: scores.get(r.id),
+    }));
+
+  // Bump last_accessed_at — Ebbinghaus decay uses this as recall anchor
+  touchAccessFireAndForget(ordered.map(m => m.id));
+
+  return ordered;
 }
 
 /**
@@ -92,7 +180,7 @@ export function getForDecision(userMessage: string, limit = 12): MemoryRecord[] 
  */
 export function getForExecution(limit = 8): MemoryRecord[] {
   const rows = db.prepare(
-    "SELECT id, type, title, content, tags, source, confidence, created_at as createdAt FROM memories WHERE user_id=? AND type IN ('working','episodic') ORDER BY created_at DESC LIMIT ?"
+    "SELECT id, type, title, content, tags, source, confidence, created_at as createdAt FROM memories WHERE user_id=? AND status='active' AND type IN ('working','episodic') ORDER BY created_at DESC LIMIT ?"
   ).all(DEFAULT_USER_ID, limit) as any[];
   return rows.map(r => ({ ...r, tags: safeParseTags(r.tags) }));
 }
@@ -159,15 +247,57 @@ export function getStats(): Record<MemoryClass, number> {
 
 /**
  * Serialize memories for Decision Agent prompt — CONTEXT-AWARE.
- * Takes the user's actual message and returns the most relevant memories.
+ * Hybrid: keyword + semantic via RRF fusion. Falls back to keyword-only
+ * if embedding provider is unavailable.
+ *
+ * Each memory carries an explicit temporal label (Zep-style) so the LLM
+ * doesn't treat stale facts as current. Format options:
+ *   [type · valid YYYY-MM-DD → now]   — fact still true
+ *   [type · valid YYYY-MM-DD → YYYY-MM-DD]  — fact has expired
+ *   [type · YYYY-MM-DD]               — point-in-time event (no validity range)
+ * This is the technical move behind Zep's 63.8% LongMemEval score (vs Mem0
+ * 49%): explicit temporal scope lets the LLM reason about whether a memory
+ * is "still in effect" instead of silently assuming.
  */
-export function serializeForPrompt(userMessage: string, limit = 10): string {
-  const mems = getForDecision(userMessage, limit);
+export async function serializeForPrompt(userMessage: string, limit = 10): Promise<string> {
+  const mems = await getForDecisionHybrid(userMessage, limit);
   if (mems.length === 0) return "No memory data yet.";
   return mems.map(m => {
-    const score = m.relevanceScore ? ` [relevance: ${m.relevanceScore.toFixed(2)}]` : "";
-    return `[${m.type}] ${m.title}: ${m.content}${score}`;
+    const score = m.relevanceScore ? ` [relevance: ${m.relevanceScore.toFixed(3)}]` : "";
+    return `${formatTemporalLabel(m)} ${m.title}: ${m.content}${score}`;
   }).join("\n");
+}
+
+/** Format a memory's temporal scope for LLM consumption.
+ *  Choices:
+ *   - episodic events → single date label (one moment in time)
+ *   - semantic/working with valid_to → expired range
+ *   - semantic/working without valid_to → still-valid range
+ *   - missing both → fall back to type label only
+ */
+function formatTemporalLabel(m: MemoryRecord): string {
+  const validFrom = m.validFrom ? toShortDate(m.validFrom) : null;
+  const validTo = m.validTo ? toShortDate(m.validTo) : null;
+
+  // Episodic memories represent a single happened-event, not an ongoing fact —
+  // a single date label is more honest than a "valid range"
+  if (m.type === "episodic" && validFrom) {
+    return `[episodic · ${validFrom}]`;
+  }
+
+  if (validFrom && validTo) {
+    return `[${m.type} · valid ${validFrom} → ${validTo}]`;
+  }
+  if (validFrom) {
+    return `[${m.type} · valid ${validFrom} → now]`;
+  }
+  return `[${m.type}]`;
+}
+
+function toShortDate(s: string): string {
+  // SQLite stores "YYYY-MM-DD HH:MM:SS"; ISO uses "YYYY-MM-DDTHH:MM:SSZ".
+  // Both have the date in chars 0-10. Robust to either.
+  return s.slice(0, 10);
 }
 
 /** Serialize Twin priors for prompt injection. */
@@ -241,6 +371,13 @@ export function writeMemory(opts: {
   db.prepare(
     "INSERT INTO memories (id, user_id, type, title, content, tags, source, confidence) VALUES (?,?,?,?,?,?,?,?)"
   ).run(id, DEFAULT_USER_ID, opts.type, opts.title, opts.content, JSON.stringify(opts.tags), opts.source, adjustedConfidence);
+
+  // Fire-and-forget: embed for semantic search. Never blocks the write path.
+  // Silently no-op if embedding provider unavailable (autoEmbed handles).
+  import("../infra/rag/index.js")
+    .then(m => m.autoEmbed(id, `${opts.title}: ${opts.content}`))
+    .catch(() => {});
+
   return id;
 }
 
@@ -428,12 +565,12 @@ const SNAPSHOT_TTL_MS = 5 * 60 * 1000; // 5 minutes — refresh after this
  * Caches the serialized memory string to enable LLM prefix caching.
  * Only refreshes every 5 minutes.
  */
-export function getFrozenSnapshot(userMessage: string): string {
+export async function getFrozenSnapshot(userMessage: string): Promise<string> {
   const now = Date.now();
   if (frozenSnapshot && (now - snapshotTimestamp) < SNAPSHOT_TTL_MS) {
     return frozenSnapshot;
   }
-  frozenSnapshot = serializeForPrompt(userMessage);
+  frozenSnapshot = await serializeForPrompt(userMessage);
   snapshotTimestamp = now;
   return frozenSnapshot;
 }

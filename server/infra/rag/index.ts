@@ -93,20 +93,47 @@ export async function semanticSearch(
 }
 
 /**
+ * Concurrency limiter for embedding calls. Dream cycles and cron jobs can
+ * writeMemory() in tight loops (10-100 writes/second); without a gate we'd
+ * fan out 100 concurrent HTTP calls to the embedding provider, triggering
+ * rate limits or 429s and possibly incurring billing spikes. Cap at 2 in
+ * flight; any overflow queues.
+ */
+const EMBED_MAX_CONCURRENT = 2;
+let embedInFlight = 0;
+const embedWaitQueue: (() => void)[] = [];
+
+function acquireEmbedSlot(): Promise<void> {
+  if (embedInFlight < EMBED_MAX_CONCURRENT) {
+    embedInFlight++;
+    return Promise.resolve();
+  }
+  return new Promise(resolve => embedWaitQueue.push(resolve));
+}
+
+function releaseEmbedSlot(): void {
+  const next = embedWaitQueue.shift();
+  if (next) next();
+  else embedInFlight--;
+}
+
+/**
  * Auto-embed a memory on write.
- * Called after writeMemory() — non-blocking, fire-and-forget.
+ * Called after writeMemory() — non-blocking, fire-and-forget, rate-limited.
  */
 export async function autoEmbed(memoryId: string, content: string): Promise<void> {
+  await acquireEmbedSlot();
   try {
-    // Dynamic import to avoid circular dep
     const { embed } = await import("../compute/index.js");
     const embeddings = await embed({ text: content });
     if (embeddings && embeddings[0]) {
       storeEmbedding(memoryId, embeddings[0], "auto");
     }
   } catch {
-    // Embedding model not available — silently skip
-    // FTS5 keyword search remains as fallback
+    // Embedding model not available — silently skip. FTS5 keyword search
+    // remains as fallback.
+  } finally {
+    releaseEmbedSlot();
   }
 }
 
@@ -122,15 +149,23 @@ export async function ragRetrieve(
     if (!queryEmb || !queryEmb[0]) return [];
 
     const results = await semanticSearch(queryEmb[0], limit);
+    if (results.length === 0) return [];
 
-    // Fetch full memory content for results
-    const enriched = results.map(r => {
-      const mem = db.prepare("SELECT id, title, content FROM memories WHERE id=?").get(r.memoryId) as any;
-      if (!mem) return null;
-      return { id: mem.id, content: `${mem.title}: ${mem.content}`, similarity: r.similarity };
-    }).filter(Boolean) as { id: string; content: string; similarity: number }[];
+    // Single batch fetch — avoids N+1 (previously: one SELECT per result)
+    const ids = results.map(r => r.memoryId);
+    const placeholders = ids.map(() => "?").join(",");
+    const rows = db.prepare(
+      `SELECT id, title, content FROM memories WHERE id IN (${placeholders})`
+    ).all(...ids) as any[];
+    const byId = new Map(rows.map(r => [r.id, r]));
 
-    return enriched;
+    return results
+      .map(r => {
+        const mem = byId.get(r.memoryId);
+        if (!mem) return null;
+        return { id: mem.id, content: `${mem.title}: ${mem.content}`, similarity: r.similarity };
+      })
+      .filter((x): x is { id: string; content: string; similarity: number } => x !== null);
   } catch {
     return []; // No embedding model → empty RAG results, L2 FTS5 still works
   }

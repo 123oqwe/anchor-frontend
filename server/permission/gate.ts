@@ -14,6 +14,7 @@
 import { DEFAULT_POLICY, LEVEL_ORDER, type ActionClass, type PermissionLevel, type RiskTier, CONTRACT_VIOLATIONS } from "./levels.js";
 import { db, DEFAULT_USER_ID } from "../infra/storage/db.js";
 import { nanoid } from "nanoid";
+import { enqueueApproval, type ApprovalRiskLevel } from "./approval-queue.js";
 
 // ── Gate types ──────────────────────────────────────────────────────────────
 
@@ -260,11 +261,41 @@ function auditedAllow(req: GateRequest): GateOutcome {
 }
 
 function persistPermissionAudit(actionClass: string, decision: string, boundary: string, source: string, description: string): void {
+  let auditId: string | null = null;
   try {
+    auditId = nanoid();
     db.prepare(
       "INSERT INTO permission_audit (id, action_class, decision, boundary, source, description) VALUES (?,?,?,?,?,?)"
-    ).run(nanoid(), actionClass, decision, boundary, source, description.slice(0, 200));
+    ).run(auditId, actionClass, decision, boundary, source, description.slice(0, 200));
   } catch (err) { console.error("[Audit] Failed to persist permission audit:", err); }
+
+  // Sprint B — #4: also surface in unified approval inbox when this gate
+  // decision is "require_confirmation". Allow/deny don't need user input.
+  //
+  // NOTE: gate's contract is sync — caller already received require_confirmation
+  // and made its own decision before this row is even visible. The inbox row
+  // is therefore INFORMATIONAL (audit trail), not actionable. We tag it so
+  // /api/approvals/:id/decide refuses to act on it and the UI can render it
+  // greyed-out as historical. Fixing this for real means making gate.ts
+  // async (large surface change) — deferred.
+  if (decision === "require_confirmation" && auditId) {
+    try {
+      const policy = DEFAULT_POLICY[actionClass as ActionClass];
+      const risk: ApprovalRiskLevel = (policy?.riskTier as ApprovalRiskLevel) ?? "medium";
+      enqueueApproval({
+        source: "gate",
+        sourceRefId: auditId,
+        title: `[audit] ${actionClass}: ${description.slice(0, 60)}`,
+        summary: `${source} requested ${actionClass}; trust level required confirmation (audit-only — caller decided synchronously)`,
+        detail: {
+          actionClass, source,
+          description: description.slice(0, 500),
+          informational: true,   // inbox decide endpoint refuses informational rows
+        },
+        riskLevel: risk,
+      });
+    } catch (err) { console.error("[Approval queue] gate enqueue failed:", err); }
+  }
 }
 
 function auditLog(agent: string, action: string): void {

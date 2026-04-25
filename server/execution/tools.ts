@@ -67,6 +67,7 @@ export function registerBuiltinTools(): void {
         success: true,
         output: `Task "${input.title}" created (${input.priority ?? "high"}).`,
         data: { taskId },
+        observation: { runtime: "db", table: "tasks", rowCount: 1, ids: [taskId] },
         rollback: () => { db.prepare("DELETE FROM tasks WHERE id=?").run(taskId); },
       };
     },
@@ -93,7 +94,12 @@ export function registerBuiltinTools(): void {
       bus.publish({ type: "GRAPH_UPDATED", payload: { nodeId: node.id, status: input.new_status, label: node.label } });
       // OPT-2: emit NODE_STATUS_CHANGED for event-triggered agents
       bus.publish({ type: "NODE_STATUS_CHANGED", payload: { nodeId: node.id, label: node.label, from: oldStatus, to: input.new_status } });
-      return { success: true, output: `"${node.label}": ${oldStatus} → ${input.new_status}.`, data: { nodeId: node.id } };
+      return {
+        success: true,
+        output: `"${node.label}": ${oldStatus} → ${input.new_status}.`,
+        data: { nodeId: node.id },
+        observation: { runtime: "db", table: "graph_nodes", rowCount: 1, ids: [node.id] },
+      };
     },
   });
 
@@ -109,7 +115,12 @@ export function registerBuiltinTools(): void {
     },
     execute: (input): ToolResult => {
       const memId = writeMemory({ type: "episodic", title: "Execution Outcome", content: input.summary, tags: ["execution", "auto"], source: "Execution Agent", confidence: 0.9 });
-      return { success: true, output: "Outcome recorded.", data: { memoryId: memId } };
+      return {
+        success: true,
+        output: "Outcome recorded.",
+        data: { memoryId: memId },
+        observation: { runtime: "db", table: "memories", rowCount: 1, ids: [memId] },
+      };
     },
   });
 
@@ -138,10 +149,18 @@ export function registerBuiltinTools(): void {
         return { success: false, output: r.output, error: r.error };
       }
       logExecution("Execution Agent", `Email sent via ${r.providerId} to ${input.to}: ${input.subject}`);
+      const respId = (r.data as any)?.messageId ?? (r.data as any)?.id ?? null;
       return {
         success: true,
         output: r.output,
         data: { ...(r.data ?? {}), providerId: r.providerId },
+        observation: {
+          runtime: "local_app",
+          providerId: r.providerId,
+          bridgeResponseId: respId ?? undefined,
+          recipient: input.to,
+          raw: r.data,
+        },
       };
     },
   });
@@ -175,9 +194,16 @@ export function registerBuiltinTools(): void {
       const r = await dispatchCapability("calendar.create_event", bridgeInput, ctx);
       if (!r.success) return { success: false, output: r.output, error: r.error };
       logExecution("Execution Agent", `Calendar event via ${r.providerId}: ${input.title} on ${input.date}`);
+      const eventId = (r.data as any)?.eventId ?? (r.data as any)?.id ?? null;
       return {
         success: true, output: r.output,
         data: { ...(r.data ?? {}), providerId: r.providerId },
+        observation: {
+          runtime: "local_app",
+          providerId: r.providerId,
+          bridgeResponseId: eventId ?? undefined,
+          raw: r.data,
+        },
       };
     },
   });
@@ -212,7 +238,18 @@ end tell`;
           script = `tell application "Reminders" to make new reminder with properties {name:"${input.title.replace(/"/g, '\\"')}"}`;
         }
         runAppleScript(script);
-        return { success: true, output: `Reminder created: "${input.title}"${input.due_date ? ` (due ${input.due_date})` : ""}` };
+        return {
+          success: true,
+          output: `Reminder created: "${input.title}"${input.due_date ? ` (due ${input.due_date})` : ""}`,
+          // Apple Reminders AppleScript doesn't return an id; we set
+          // bridgeResponseId to a synthetic marker so reminder_exists
+          // verifier knows the bridge round-trip didn't error out.
+          observation: {
+            runtime: "local_app",
+            providerId: "apple-reminders",
+            bridgeResponseId: `applescript:${input.title.slice(0, 40)}`,
+          },
+        };
       } catch (err: any) {
         return { success: false, output: `Reminder error: ${err.message}`, error: err.message };
       }
@@ -362,6 +399,122 @@ end tell`;
     },
   });
 
+  // ═══ Per-agent SEARCHABLE memory ═══════════════════════════════════════
+  // Unlike agent_state_get/set (exact-key KV) and record_outcome (global
+  // pool), these two give the agent an FTS-indexed scratchpad scoped to
+  // itself. Essential for long-horizon runs: agent can "remember this
+  // finding" mid-run, and compaction can elide the tool output knowing
+  // the summary was persisted here.
+
+  registerTool({
+    name: "memory_remember",
+    description: "Save a fact, finding, or decision to your own persistent memory. Use when you discover something mid-run that you'll want to reference later — either in a future turn (after context compaction) or a future run of this same agent. Prefer 1-3 sentences over dumping raw data.",
+    handler: "db",
+    actionClass: "write_memory",
+    inputSchema: {
+      type: "object",
+      properties: {
+        title:   { type: "string", description: "Short descriptor (under 80 chars)" },
+        content: { type: "string", description: "The fact/finding itself (1-3 sentences ideal; max 4KB)" },
+        tags:    { type: "array", items: { type: "string" }, description: "Optional keywords for later retrieval" },
+      },
+      required: ["title", "content"],
+    },
+    execute: (input, ctx): ToolResult => {
+      const agentId = ctx?.agentId;
+      if (!agentId) return { success: false, output: "memory_remember only callable from custom agents", error: "NO_AGENT_CONTEXT" };
+      if (input.content.length > 4096) return { success: false, output: "Content exceeds 4KB limit — summarize first", error: "CONTENT_TOO_LARGE" };
+
+      const tagList = Array.isArray(input.tags) ? input.tags : [];
+      const memId = writeMemory({
+        type: "semantic",
+        title: input.title.slice(0, 120),
+        content: input.content,
+        tags: [...tagList, `agent:${agentId}`],
+        source: `agent:${agentId}`,
+        confidence: 0.85,
+      });
+      return { success: true, output: `Remembered: ${input.title}`, data: { memoryId: memId } };
+    },
+  });
+
+  registerTool({
+    name: "memory_recall",
+    description: "Search your own memory (things you remembered in prior turns or prior runs of this agent). Returns up to 5 matches ranked by relevance.",
+    handler: "db",
+    actionClass: "read_memory",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Keywords or phrase to search for" },
+        limit: { type: "number", description: "Max matches (default 5, max 10)" },
+      },
+      required: ["query"],
+    },
+    execute: (input, ctx): ToolResult => {
+      const agentId = ctx?.agentId;
+      if (!agentId) return { success: false, output: "memory_recall only callable from custom agents", error: "NO_AGENT_CONTEXT" };
+      const limit = Math.min(10, Math.max(1, input.limit ?? 5));
+      // FTS5 MATCH — scope via source filter. FTS handles keyword tokenization;
+      // we simply pass through the query after minimal sanitization.
+      const safeQuery = String(input.query).replace(/"/g, " ").trim();
+      if (!safeQuery) return { success: false, output: "empty query", error: "BAD_QUERY" };
+      let rows: any[] = [];
+      try {
+        rows = db.prepare(
+          `SELECT m.title, m.content, m.created_at
+           FROM memories_fts f
+           JOIN memories m ON m.rowid = f.rowid
+           WHERE memories_fts MATCH ? AND m.source = ?
+           ORDER BY rank LIMIT ?`
+        ).all(safeQuery, `agent:${agentId}`, limit);
+      } catch {
+        // Fall back to LIKE if FTS syntax rejects the query
+        rows = db.prepare(
+          `SELECT title, content, created_at FROM memories
+           WHERE source=? AND (title LIKE ? OR content LIKE ?)
+           ORDER BY created_at DESC LIMIT ?`
+        ).all(`agent:${agentId}`, `%${safeQuery}%`, `%${safeQuery}%`, limit);
+      }
+      if (rows.length === 0) return { success: true, output: "(no matching memories)", data: { matches: [] } };
+      const out = rows.map((r: any) => `• [${r.created_at.slice(0, 10)}] ${r.title}: ${r.content.slice(0, 240)}${r.content.length > 240 ? "…" : ""}`).join("\n");
+      return { success: true, output: out, data: { matches: rows } };
+    },
+  });
+
+  // ═══ Interrupt — agent-initiated pause for HITL ═══════════════════════
+  // The tool itself just returns a sentinel in its output. The ReAct loop
+  // detects the INTERRUPT_REQUESTED marker on tool_result and exits
+  // cleanly, persisting the question to agent_runs. User resumes via
+  // POST /api/runs/:id/resume with their reply.
+
+  registerTool({
+    name: "request_user_input",
+    description: "Pause execution and ask the user a specific question. Use BEFORE destructive or high-stakes actions (sending important emails, scheduling with real people, spending money, publishing content) or when context is genuinely ambiguous and guessing would be worse than asking. The run halts, the user sees your question, and when they reply you resume with their answer as a new message.",
+    handler: "db",
+    actionClass: "read_memory",
+    inputSchema: {
+      type: "object",
+      properties: {
+        question: { type: "string", description: "The question to show the user (1-2 sentences ideal)" },
+        context:  { type: "string", description: "Optional: brief context for why you're asking (what you're about to do)" },
+      },
+      required: ["question"],
+    },
+    execute: (input): ToolResult => {
+      const question = String(input.question ?? "").trim();
+      if (!question) return { success: false, output: "question required", error: "BAD_INPUT" };
+      const context = String(input.context ?? "").trim();
+      // The sentinel + marker are parsed by custom-agent-react.ts after the
+      // tool dispatch loop. Use a unique token to avoid false positives.
+      return {
+        success: true,
+        output: `__ANCHOR_INTERRUPT__ ${question}${context ? ` || context: ${context}` : ""}`,
+        data: { interrupt: true, question, context },
+      };
+    },
+  });
+
   // ═══ Agent Composition — delegate (Claude Code-style subagent) ═════════
   // (registered below via registerDelegateTool — replaces old call_agent)
 
@@ -370,5 +523,5 @@ end tell`;
   registerDelegateTool();
   registerHandoffTool();
 
-  console.log(`[Execution] 14 tools registered (3 DB + 4 shell + 2 network + 1 execute_code + 2 agent_state + 1 delegate + 1 handoff)`);
+  console.log(`[Execution] 16 tools registered (3 DB + 4 shell + 2 network + 1 execute_code + 2 agent_state + 2 memory + 1 delegate + 1 handoff)`);
 }

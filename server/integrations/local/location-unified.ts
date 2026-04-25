@@ -18,6 +18,7 @@
 import { execSync } from "child_process";
 import fs from "fs";
 import type { CalendarSummary, UnifiedEvent } from "./calendar-unified.js";
+import { shadowEmit } from "../../infra/storage/scanner-events.js";
 
 export interface LocationSignal {
   name: string;
@@ -178,7 +179,7 @@ export async function scanLocationUnified(opts?: {
     opts?.systemTimezone ? `TZ: ${opts.systemTimezone}` : "",
   ].filter(Boolean).join(". ");
 
-  return {
+  const result: LocationUnifiedSummary = {
     wifiAccessible: wifi.accessible,
     wifiReason: wifi.reason,
     knownWifi: wifi.ssids,
@@ -190,6 +191,24 @@ export async function scanLocationUnified(opts?: {
     signals,
     coverage,
   };
+
+  shadowEmit({
+    scanner: "location-unified",
+    source: "manual",
+    kind: "location_scan_summary",
+    stableFields: { scanDay: new Date().toISOString().slice(0, 10) },
+    payload: {
+      wifiAccessible: result.wifiAccessible,
+      knownWifiCount: result.knownWifi.length,
+      homeWifiCount: result.homeWifi?.length ?? 0,
+      workWifiCount: result.workWifi?.length ?? 0,
+      cafeWifiCount: result.cafeWifi.length,
+      calendarLocationCount: result.calendarLocations.length,
+      systemTimezone: opts?.systemTimezone,
+    },
+  });
+
+  return result;
 }
 
 // ── Render ───────────────────────────────────────────────────────────────

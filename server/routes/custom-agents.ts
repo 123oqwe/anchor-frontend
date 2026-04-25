@@ -15,6 +15,12 @@ import { writeMemory } from "../memory/retrieval.js";
 import { trackPlanDecision } from "../cognition/twin.js";
 import { workspacePath } from "../execution/workspace.js";
 import { listSkillsForAgent } from "../execution/skill-extractor.js";
+import {
+  parseAgentConfig,
+  buildSystemPromptFromConfig,
+  recordRunInVitality,
+  AgentConfigSchema,
+} from "../cognition/agent-config.js";
 
 const router = Router();
 
@@ -26,10 +32,15 @@ const AGENT_TEMPLATES = [
   { name: "Weekly Strategist", instructions: "You analyze the user's week — what went well, what was avoided, what patterns emerged. Give honest, direct feedback like an executive coach.", tools: [] },
 ];
 
-// List custom agents
+// List custom agents — also expose parsed config (Soul/Body/Faculty/...)
 router.get("/custom", (_req, res) => {
   const agents = db.prepare("SELECT * FROM user_agents WHERE user_id=? ORDER BY created_at DESC").all(DEFAULT_USER_ID);
-  res.json(agents.map((a: any) => ({ ...a, tools: JSON.parse(a.tools), trigger_config: JSON.parse(a.trigger_config) })));
+  res.json(agents.map((a: any) => ({
+    ...a,
+    tools: JSON.parse(a.tools),
+    trigger_config: JSON.parse(a.trigger_config),
+    config: parseAgentConfig(a.config_json),  // structured layers — preferred by new clients
+  })));
 });
 
 // Get templates
@@ -37,13 +48,32 @@ router.get("/custom/templates", (_req, res) => {
   res.json(AGENT_TEMPLATES);
 });
 
-// Create custom agent
+// Create custom agent — accepts optional structured config (Soul/Body/Faculty/...)
 router.post("/custom", (req, res) => {
-  const { name, instructions, tools, trigger_type, trigger_config, model_preference } = req.body;
+  const { name, instructions, tools, trigger_type, trigger_config, model_preference, config } = req.body;
   if (!name || !instructions) return res.status(400).json({ error: "name and instructions required" });
+
+  // Validate and normalize the structured config; missing / invalid → safe defaults.
+  // Body.role defaults to the agent name when omitted (most natural fit).
+  const parsed = AgentConfigSchema.safeParse(config ?? {});
+  if (config && !parsed.success) {
+    return res.status(400).json({ error: "invalid config shape", details: parsed.error.message });
+  }
+  const finalConfig = parsed.success ? parsed.data : AgentConfigSchema.parse({});
+  if (!finalConfig.body.role) finalConfig.body.role = name;
+  if (!finalConfig.soul.purpose) finalConfig.soul.purpose = String(instructions).slice(0, 140);
+
   const id = nanoid();
-  db.prepare("INSERT INTO user_agents (id, user_id, name, instructions, tools, trigger_type, trigger_config, model_preference) VALUES (?,?,?,?,?,?,?,?)")
-    .run(id, DEFAULT_USER_ID, name, instructions, JSON.stringify(tools ?? []), trigger_type ?? "manual", JSON.stringify(trigger_config ?? {}), model_preference ?? null);
+  db.prepare(
+    "INSERT INTO user_agents (id, user_id, name, instructions, tools, trigger_type, trigger_config, model_preference, config_json) VALUES (?,?,?,?,?,?,?,?,?)"
+  ).run(
+    id, DEFAULT_USER_ID, name, instructions,
+    JSON.stringify(tools ?? []),
+    trigger_type ?? "manual",
+    JSON.stringify(trigger_config ?? {}),
+    model_preference ?? null,
+    JSON.stringify(finalConfig),
+  );
   res.json({ id });
 });
 
@@ -60,11 +90,31 @@ router.post("/custom/install-template", (req, res) => {
   res.json({ id, installed: true });
 });
 
-// Update
+// Update — accepts structured config too (merge-style: omit a layer to preserve it)
 router.put("/custom/:id", (req, res) => {
-  const { name, instructions, tools, trigger_type, trigger_config } = req.body;
-  db.prepare("UPDATE user_agents SET name=?, instructions=?, tools=?, trigger_type=?, trigger_config=? WHERE id=? AND user_id=?")
-    .run(name, instructions, JSON.stringify(tools ?? []), trigger_type ?? "manual", JSON.stringify(trigger_config ?? {}), req.params.id, DEFAULT_USER_ID);
+  const { name, instructions, tools, trigger_type, trigger_config, config } = req.body;
+
+  // If `config` is provided, validate and merge with current row's config so
+  // the user can update one layer without re-sending the others.
+  let configJsonForWrite: string | null = null;
+  if (config !== undefined) {
+    const existing = db.prepare("SELECT config_json FROM user_agents WHERE id=? AND user_id=?").get(req.params.id, DEFAULT_USER_ID) as any;
+    const current = parseAgentConfig(existing?.config_json);
+    const merged = { ...current, ...config };
+    const parsed = AgentConfigSchema.safeParse(merged);
+    if (!parsed.success) {
+      return res.status(400).json({ error: "invalid config shape", details: parsed.error.message });
+    }
+    configJsonForWrite = JSON.stringify(parsed.data);
+  }
+
+  if (configJsonForWrite !== null) {
+    db.prepare("UPDATE user_agents SET name=?, instructions=?, tools=?, trigger_type=?, trigger_config=?, config_json=? WHERE id=? AND user_id=?")
+      .run(name, instructions, JSON.stringify(tools ?? []), trigger_type ?? "manual", JSON.stringify(trigger_config ?? {}), configJsonForWrite, req.params.id, DEFAULT_USER_ID);
+  } else {
+    db.prepare("UPDATE user_agents SET name=?, instructions=?, tools=?, trigger_type=?, trigger_config=? WHERE id=? AND user_id=?")
+      .run(name, instructions, JSON.stringify(tools ?? []), trigger_type ?? "manual", JSON.stringify(trigger_config ?? {}), req.params.id, DEFAULT_USER_ID);
+  }
   res.json({ ok: true });
 });
 
@@ -85,6 +135,10 @@ router.post("/custom/:id/run", async (req, res) => {
   const runId = nanoid();  // OPT-4: trace correlation
   const allowedTools: string[] = (() => { try { return JSON.parse(agent.tools) ?? []; } catch { return []; } })();
 
+  // Capture run start time so we can record latency in vitality on completion.
+  const runStartMs = Date.now();
+  const agentConfig = parseAgentConfig(agent.config_json);
+
   try {
     const graphContext = serializeForPrompt();
 
@@ -97,13 +151,28 @@ router.post("/custom/:id/run", async (req, res) => {
       ? `\n\nPREVIOUS CONVERSATIONS WITH THIS AGENT:\n${prevRuns.map((r: any) => r.content.slice(0, 200)).join("\n---\n")}`
       : "";
 
-    const systemPrompt = `${agent.instructions}\n\nUser's Human Graph context:\n${graphContext}${prevContext}`;
+    // Compose system prompt by stacking:
+    //   1. structured Soul/Body/Faculty/Examples (if config has any)  ← preferred
+    //   2. legacy `instructions` string                                  ← always present (backward compat)
+    //   3. graph + previous-conversation context                         ← runtime data
+    // The structured layer goes first because Hermes research shows identity
+    // needs to be the LLM's first impression. The legacy string follows so
+    // existing agents that haven't migrated their config still work.
+    const layeredPrompt = buildSystemPromptFromConfig(agentConfig);
+    const systemPrompt = [
+      layeredPrompt,
+      agent.instructions,
+      `User's Human Graph context:\n${graphContext}${prevContext}`,
+    ].filter(s => s && String(s).trim().length > 0).join("\n\n");
 
     // Branch: if agent has tools configured, route through ReAct loop so it can
     // actually call them. Otherwise, use plain text() for lower latency/cost.
     let result: string;
     let toolCalls: { name: string; input: any; output: string; success: boolean; latencyMs: number }[] = [];
 
+    let runStatus: string | undefined;
+    let interruptQuestion: string | undefined;
+    let interruptContext: string | undefined;
     if (allowedTools.length > 0) {
       const { runCustomAgentReAct } = await import("../execution/custom-agent-react.js");
       const reactResult = await runCustomAgentReAct({
@@ -116,6 +185,9 @@ router.post("/custom/:id/run", async (req, res) => {
       });
       result = reactResult.text || "(agent completed tool calls but produced no text output)";
       toolCalls = reactResult.toolCalls;
+      runStatus = reactResult.status;
+      interruptQuestion = reactResult.interruptQuestion;
+      interruptContext = reactResult.interruptContext;
     } else {
       result = await text({
         task: "decision",
@@ -131,6 +203,18 @@ router.post("/custom/:id/run", async (req, res) => {
     db.prepare("INSERT INTO agent_executions (id, user_id, agent, action, status, run_id) VALUES (?,?,?,?,?,?)")
       .run(nanoid(), DEFAULT_USER_ID, `Custom: ${agent.name}`, message.slice(0, 100), "success", runId);
 
+    // Update vitality: success_count++, last_run_at = now, rolling avg latency.
+    // Persist back into config_json so the next /run sees it. Best-effort —
+    // a vitality write failure should never break the run response.
+    try {
+      const updated = recordRunInVitality(agentConfig, {
+        success: true,
+        latencyMs: Date.now() - runStartMs,
+      });
+      db.prepare("UPDATE user_agents SET config_json=? WHERE id=? AND user_id=?")
+        .run(JSON.stringify(updated), agent.id, DEFAULT_USER_ID);
+    } catch {}
+
     // Save result as episodic memory (so next run has context)
     writeMemory({
       type: "episodic",
@@ -144,10 +228,26 @@ router.post("/custom/:id/run", async (req, res) => {
     // Extract insights into graph (non-blocking, fires async internally)
     extractFromMessage(result);
 
-    res.json({ id: runId, content: result, agentName: agent.name, toolCalls });
+    res.json({
+      id: runId, content: result, agentName: agent.name, toolCalls,
+      status: runStatus ?? "completed",
+      ...(interruptQuestion ? { interruptQuestion, interruptContext } : {}),
+    });
   } catch (err: any) {
     db.prepare("INSERT INTO agent_executions (id, user_id, agent, action, status, run_id) VALUES (?,?,?,?,?,?)")
       .run(nanoid(), DEFAULT_USER_ID, `Custom: ${agent.name}`, message.slice(0, 100), "failed", runId);
+
+    // Vitality: failure_count++, capture last_error for diagnostic visibility
+    try {
+      const updated = recordRunInVitality(agentConfig, {
+        success: false,
+        latencyMs: Date.now() - runStartMs,
+        error: err?.message ?? "unknown",
+      });
+      db.prepare("UPDATE user_agents SET config_json=? WHERE id=? AND user_id=?")
+        .run(JSON.stringify(updated), agent.id, DEFAULT_USER_ID);
+    } catch {}
+
     res.status(500).json({ error: err.message });
   }
 });
@@ -583,6 +683,174 @@ router.post("/custom/import", (req, res) => {
 
   logExecution("Custom Agent", `Imported: ${finalName}`);
   res.json({ ok: true, id, name: finalName, renamed: finalName !== data.agent.name });
+});
+
+// ── Streaming run endpoint ───────────────────────────────────────────────
+// Same semantics as POST /custom/:id/run but returns text/event-stream with
+// granular StreamEvents. Frontend uses EventSource to subscribe and renders
+// text + tool args + results as they arrive. Event protocol documented in
+// server/execution/stream-events.ts.
+router.post("/custom/:id/run/stream", async (req, res) => {
+  const agent = db.prepare("SELECT * FROM user_agents WHERE id=? AND user_id=?").get(req.params.id, DEFAULT_USER_ID) as any;
+  if (!agent) return res.status(404).json({ error: "Agent not found" });
+  const { message } = req.body;
+  if (!message) return res.status(400).json({ error: "message required" });
+
+  // SSE headers — disable response buffering so events hit the wire
+  // immediately, not when Node flushes its own buffer.
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders?.();
+
+  const runId = nanoid();
+  const allowedTools: string[] = (() => { try { return JSON.parse(agent.tools) ?? []; } catch { return []; } })();
+
+  const { encodeSSE, SSE_HEARTBEAT } = await import("../execution/stream-events.js");
+  const emit = (event: any) => {
+    if (!res.writableEnded) res.write(encodeSSE(event));
+  };
+
+  // Heartbeat every 15s to keep intermediaries from closing the connection.
+  const heartbeat = setInterval(() => {
+    if (!res.writableEnded) res.write(SSE_HEARTBEAT);
+  }, 15_000);
+
+  // If client disconnects, we cancel the run cooperatively — the ReAct
+  // loop's isCancelled check at the top of each turn will see it and exit.
+  req.on("close", async () => {
+    clearInterval(heartbeat);
+    if (!res.writableEnded) {
+      const { markCancelled } = await import("../execution/checkpoint.js");
+      markCancelled(runId);
+    }
+  });
+
+  try {
+    const graphContext = serializeForPrompt();
+    const prevRuns = db.prepare(
+      "SELECT content FROM memories WHERE user_id=? AND source=? AND type='episodic' ORDER BY created_at DESC LIMIT 5"
+    ).all(DEFAULT_USER_ID, `Custom: ${agent.name}`) as any[];
+    const prevContext = prevRuns.length > 0
+      ? `\n\nPREVIOUS CONVERSATIONS WITH THIS AGENT:\n${prevRuns.map((r: any) => r.content.slice(0, 200)).join("\n---\n")}`
+      : "";
+    const systemPrompt = `${agent.instructions}\n\nUser's Human Graph context:\n${graphContext}${prevContext}`;
+
+    if (allowedTools.length === 0) {
+      // No tools — agent is a plain chatbot. Still stream text deltas so
+      // UX feels consistent with tool-using agents.
+      emit({ type: "run_start", runId, agentId: agent.id, agentName: agent.name });
+      emit({ type: "turn_start", turn: 0, tier: "strong" });
+      const result = await text({
+        task: "decision",
+        system: systemPrompt,
+        messages: [{ role: "user", content: message }],
+        maxTokens: 2000,
+        runId,
+        agentName: `Custom: ${agent.name}`,
+      });
+      emit({ type: "text_delta", turn: 0, text: result });
+      emit({ type: "turn_end", turn: 0, tier: "strong", toolsExecuted: 0 });
+      emit({ type: "run_end", status: "completed", finalText: result, totalTurns: 1, toolCallCount: 0, tierMix: "strong=1" });
+    } else {
+      const { runCustomAgentReAct } = await import("../execution/custom-agent-react.js");
+      await runCustomAgentReAct({
+        agentId: agent.id,
+        agentName: agent.name,
+        systemPrompt,
+        userMessage: message,
+        allowedTools,
+        runId,
+        onEvent: emit,
+      });
+    }
+  } catch (err: any) {
+    emit({ type: "error", message: err?.message ?? "run failed" });
+  } finally {
+    clearInterval(heartbeat);
+    if (!res.writableEnded) res.end();
+  }
+});
+
+// ── Run control endpoints — inspect / resume / cancel ────────────────────
+
+router.get("/runs/:runId", async (req, res) => {
+  const { loadRun } = await import("../execution/checkpoint.js");
+  const run = loadRun(req.params.runId);
+  if (!run) return res.status(404).json({ error: "Run not found" });
+  // Don't leak the full messages array on list view — expose a summary
+  res.json({
+    id: run.id, agentId: run.agentId, agentName: run.agentName, status: run.status,
+    turn: run.turn, maxTurns: run.maxTurns,
+    userMessage: run.userMessage, finalText: run.finalText,
+    toolCalls: run.toolCalls, interruptQuestion: run.interruptQuestion,
+    interruptReason: run.interruptReason, error: run.error,
+    createdAt: run.createdAt, updatedAt: run.updatedAt,
+    messageCount: run.messages.length,
+  });
+});
+
+router.post("/runs/:runId/resume", async (req, res) => {
+  const { loadRun } = await import("../execution/checkpoint.js");
+  const run = loadRun(req.params.runId);
+  if (!run) return res.status(404).json({ error: "Run not found" });
+  if (run.status !== "interrupted") {
+    return res.status(409).json({ error: `Run is ${run.status}, not interrupted — cannot resume` });
+  }
+  const userReply = typeof req.body?.message === "string" ? req.body.message : "";
+  if (!userReply.trim()) return res.status(400).json({ error: "message (user's reply) required" });
+
+  // Append the user's reply as a new user message AFTER the interrupted
+  // turn's tool_use → tool_result pair. The ReAct loop will see it and
+  // continue reasoning with the answer in hand.
+  const resumedMessages = [
+    ...run.messages,
+    { role: "user" as const, content: userReply },
+  ];
+
+  try {
+    const { runCustomAgentReAct } = await import("../execution/custom-agent-react.js");
+    const result = await runCustomAgentReAct({
+      agentId: run.agentId,
+      agentName: run.agentName,
+      systemPrompt: run.systemPrompt,
+      userMessage: run.userMessage,        // original task, for logging/memory
+      allowedTools: run.allowedTools,
+      runId: run.id,
+      missionId: run.missionId,
+      initialMessages: resumedMessages,
+      initialTurn: run.turn,
+      initialToolCalls: run.toolCalls as any,
+      isResume: true,
+    });
+    res.json({
+      id: run.id, content: result.text, agentName: run.agentName,
+      toolCalls: result.toolCalls, status: result.status ?? "completed",
+      ...(result.interruptQuestion ? {
+        interruptQuestion: result.interruptQuestion,
+        interruptContext: result.interruptContext,
+      } : {}),
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message ?? "resume failed" });
+  }
+});
+
+router.post("/runs/:runId/cancel", async (req, res) => {
+  const { markCancelled } = await import("../execution/checkpoint.js");
+  const ok = markCancelled(req.params.runId);
+  res.json({ ok, runId: req.params.runId });
+});
+
+router.get("/runs", async (req, res) => {
+  const { listRuns } = await import("../execution/checkpoint.js");
+  const runs = listRuns({
+    status: (req.query.status as any) || undefined,
+    agentId: typeof req.query.agentId === "string" ? req.query.agentId : undefined,
+    limit: req.query.limit ? parseInt(String(req.query.limit), 10) : undefined,
+  });
+  res.json({ runs, count: runs.length });
 });
 
 export default router;

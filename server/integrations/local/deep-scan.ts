@@ -44,11 +44,9 @@ import {
   calendarSummaryToText,
   type CalendarSummary,
 } from "./calendar-unified.js";
-import {
-  scanIMessage,
-  chatSummaryToText,
-  type ChatSummary,
-} from "./imessage-scanner.js";
+// iMessage is now owned by messages-unified.ts (which calls scanIMessage).
+// chatSummary field removed from MacProfile — content fully subsumed by
+// messagesUnified to avoid duplicate profileText output.
 import {
   scanMessagesUnified,
   messagesUnifiedToText,
@@ -116,9 +114,9 @@ export interface MacProfile {
 
   // Step 5 — unified calendar summary (optional; populated only if scan ran)
   calendarSummary?: CalendarSummary;
-
-  // Step 6 — iMessage relationship strength (optional; needs FDDA)
-  chatSummary?: ChatSummary;
+  // Per-event calendar data; kept separate from summary because timeline
+  // ingestion needs individual events while profileToText only renders summary.
+  calendarEvents?: import("./calendar-unified.js").UnifiedEvent[];
 
   // Messages Unification — iMessage + Telegram/Slack/WeChat activity fusion
   messagesUnified?: MessagesUnifiedSummary;
@@ -312,6 +310,8 @@ export async function deepScanMacAsync(): Promise<MacProfile> {
   profile.emailUnified = email;
   profile.codeUnified = code;
   profile.mediaUnified = media;
+  profile.calendarSummary = calendar.summary;
+  profile.calendarEvents = calendar.events;
   // Location uses calendar events (when available) and localization's timezone
   profile.locationUnified = await scanLocationUnified({
     calendarEvents: calendar.events,
@@ -347,7 +347,6 @@ export function deepScanMac(): MacProfile {
 
   const localization = readLocalizationFingerprint();
   const pairSignatures = matchPairSignatures(registryMatched, localization);
-  const chatSummary = scanIMessage(90);
 
   const profile: MacProfile = {
     apps: appInfos,
@@ -363,7 +362,6 @@ export function deepScanMac(): MacProfile {
     unknownApps: unknown,
     localization,
     pairSignatures,
-    chatSummary,
   };
 
   const knownCount = appInfos.filter(a => a.known).length;
@@ -401,13 +399,7 @@ export function profileToText(profile: MacProfile): string {
     sections.push("");
   }
 
-  // ── Step 6: iMessage relationship strength — who actually matters
-  if (profile.chatSummary) {
-    sections.push(chatSummaryToText(profile.chatSummary));
-    sections.push("");
-  }
-
-  // ── Messages Unification — cross-app chat view
+  // ── Messages Unification — cross-app chat view (subsumes Step 6 iMessage)
   if (profile.messagesUnified) {
     sections.push(messagesUnifiedToText(profile.messagesUnified));
     sections.push("");

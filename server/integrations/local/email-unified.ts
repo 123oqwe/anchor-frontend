@@ -23,6 +23,7 @@ import path from "path";
 import os from "os";
 import { getTokens } from "../token-store.js";
 import { DEFAULT_USER_ID } from "../../infra/storage/db.js";
+import { shadowEmit } from "../../infra/storage/scanner-events.js";
 
 const HOME = os.homedir();
 
@@ -343,7 +344,7 @@ export async function scanEmailUnified(): Promise<EmailUnifiedSummary> {
 
   const coverage = buildCoverage(apps, gmailToken !== null);
 
-  return {
+  const result: EmailUnifiedSummary = {
     accessible: true,
     apps,
     primarySource: "apple-mail",
@@ -357,6 +358,24 @@ export async function scanEmailUnified(): Promise<EmailUnifiedSummary> {
     signals,
     coverage,
   };
+
+  shadowEmit({
+    scanner: "email-unified",
+    source: "mail",
+    kind: "email_scan_summary",
+    stableFields: { scanDay: new Date().toISOString().slice(0, 10) },
+    payload: {
+      inboxLast30d: result.inboxLast30d,
+      sentLast30d: result.sentLast30d,
+      inboxUnread: result.inboxUnread,
+      topReceivedFrom: result.topReceivedFrom?.slice(0, 10),
+      topSentTo: result.topSentTo?.slice(0, 10),
+      subscriptionsDetected: result.subscriptionsDetected,
+      apps: result.apps.map(a => ({ id: a.appId, active: a.active, tier: a.tier })),
+    },
+  });
+
+  return result;
 }
 
 function buildCoverage(apps: EmailApp[], hasGmailToken: boolean): string {

@@ -19,6 +19,7 @@ import { db, DEFAULT_USER_ID } from "../../infra/storage/db.js";
 import { findApp } from "./app-registry.js";
 import { scanIMessage, type ChatSummary, type ChatContact } from "./imessage-scanner.js";
 import { getTokens } from "../token-store.js";
+import { shadowEmit } from "../../infra/storage/scanner-events.js";
 
 export type MessagesTier = "full-content" | "api" | "frequency-proxy" | "presence-only";
 
@@ -277,7 +278,7 @@ export async function scanMessagesUnified(): Promise<MessagesUnifiedSummary> {
 
   const coverage = buildCoverageStatement(apps, imessageSummary);
 
-  return {
+  const result: MessagesUnifiedSummary = {
     apps,
     totalAppsInstalled: installed.length,
     totalAppsActive: active.length,
@@ -288,6 +289,24 @@ export async function scanMessagesUnified(): Promise<MessagesUnifiedSummary> {
     signals,
     coverage,
   };
+
+  shadowEmit({
+    scanner: "messages-unified",
+    source: "imessage",
+    kind: "messages_scan_summary",
+    stableFields: { scanDay: new Date().toISOString().slice(0, 10) },
+    payload: {
+      totalAppsInstalled: result.totalAppsInstalled,
+      totalAppsActive: result.totalAppsActive,
+      primaryChat: result.primaryChat,
+      primaryChatDominance: result.primaryChatDominance,
+      apps: result.apps.map(a => ({ id: a.appId, active: a.active, tier: a.tier, messageCount: a.messageCount })),
+      topContactCount: result.topContacts.length,
+      crossAppMatches: result.crossAppMatches,
+    },
+  });
+
+  return result;
 }
 
 function buildCoverageStatement(apps: ChatAppStatus[], imessageSummary: ChatSummary): string {
@@ -333,10 +352,10 @@ export function messagesUnifiedToText(summary: MessagesUnifiedSummary): string {
     }
   }
 
-  // Presence-only list
+  // Presence-only count (list itself appears in Coverage + signals below)
   const presenceOnly = summary.apps.filter(a => a.installed && !a.active);
   if (presenceOnly.length > 0) {
-    lines.push(`  Installed but inactive: ${presenceOnly.map(a => a.displayName).join(", ")}`);
+    lines.push(`  Installed but inactive: ${presenceOnly.length}`);
   }
 
   // Top contacts (from iMessage)

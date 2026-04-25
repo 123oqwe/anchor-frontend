@@ -255,4 +255,26 @@ export const api = {
   triggerBrowserScan: () => req<any>("POST", "/api/integrations/local/scan/browser", {}),
   triggerContactsScan: () => req<any>("POST", "/api/integrations/local/scan/contacts", {}),
   triggerCalendarScan: () => req<any>("POST", "/api/integrations/local/scan/calendar", {}),
+
+  // Sprint B — #4 — Unified Approval Inbox
+  listApprovals: (status: string = "pending", source?: string) =>
+    req<any[]>("GET", `/api/approvals?status=${status}${source ? `&source=${source}` : ""}`),
+  approvalStats: () => req<{ pending: number; pendingByRisk: Record<string, number>; pendingBySource: Record<string, number> }>("GET", "/api/approvals/stats"),
+  decideApproval: (id: string, approve: boolean, reason?: string) =>
+    req<any>("POST", `/api/approvals/${id}/decide`, { approve, reason }),
+
+  // Phase 1-4 of #2 — Action sessions
+  listSessions: (status?: string, limit?: number) =>
+    req<any[]>("GET", `/api/sessions${status || limit ? "?" : ""}${status ? `status=${status}` : ""}${status && limit ? "&" : ""}${limit ? `limit=${limit}` : ""}`),
+  getSession: (id: string) => req<any>("GET", `/api/sessions/${id}`),
+  pauseSession: (id: string) => req<any>("PATCH", `/api/sessions/${id}/pause`, {}),
+  resumeSession: (id: string) => req<any>("PATCH", `/api/sessions/${id}/resume`, {}),
+  cancelSession: (id: string) => req<any>("PATCH", `/api/sessions/${id}/cancel`, {}),
+  takeoverSession: (id: string) => req<any>("POST", `/api/sessions/${id}/takeover`, {}),
+  editStep: (sessionId: string, stepId: string, body: any) =>
+    req<any>("PATCH", `/api/sessions/${sessionId}/steps/${stepId}`, body),
+  insertStep: (sessionId: string, body: any) =>
+    req<any>("POST", `/api/sessions/${sessionId}/steps`, body),
+  skipStep: (sessionId: string, stepId: string) =>
+    req<any>("DELETE", `/api/sessions/${sessionId}/steps/${stepId}`),
 };
