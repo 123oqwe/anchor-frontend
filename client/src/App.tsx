@@ -5,7 +5,6 @@ import { Route, Switch, Redirect } from "wouter";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { ThemeProvider } from "./contexts/ThemeContext";
 import AppLayout from "./components/AppLayout";
-import AdminLayout from "./components/AdminLayout";
 import CommandPalette from "./components/CommandPalette";
 import { useWebSocket } from "./hooks/useWebSocket";
 import Onboarding from "./pages/Onboarding";
@@ -20,45 +19,13 @@ import Agents from "./pages/Agents";
 import AgentInspector from "./pages/AgentInspector";
 import PortraitCeremony from "./pages/PortraitCeremony";
 import Scan from "./pages/Scan";
-import Cortex from "./pages/Cortex";
 import Approvals from "./pages/Approvals";
 import Sessions from "./pages/Sessions";
 import SessionDetail from "./pages/SessionDetail";
-import Logs from "./pages/admin/Logs";
-import Data from "./pages/admin/Data";
-import Costs from "./pages/admin/Costs";
-import Performance from "./pages/admin/Performance";
-import GraphAdmin from "./pages/admin/Graph";
-import MemoryAdmin from "./pages/admin/Memory";
-import Health from "./pages/admin/Health";
-import Runs from "./pages/admin/Runs";
-import RunTrace from "./pages/admin/RunTrace";
-import BridgesAdvanced from "./pages/admin/BridgesAdvanced";
-import Jobs from "./pages/admin/Jobs";
-import Hooks from "./pages/admin/Hooks";
-import Missions from "./pages/admin/Missions";
-import MissionDetail from "./pages/admin/MissionDetail";
 
 function Router() {
   return (
     <Switch>
-      {/* Admin routes */}
-      <Route path="/admin"><AdminLayout><Cortex /></AdminLayout></Route>
-      <Route path="/admin/costs"><AdminLayout><Costs /></AdminLayout></Route>
-      <Route path="/admin/performance"><AdminLayout><Performance /></AdminLayout></Route>
-      <Route path="/admin/logs"><AdminLayout><Logs /></AdminLayout></Route>
-      <Route path="/admin/graph"><AdminLayout><GraphAdmin /></AdminLayout></Route>
-      <Route path="/admin/memory"><AdminLayout><MemoryAdmin /></AdminLayout></Route>
-      <Route path="/admin/data"><AdminLayout><Data /></AdminLayout></Route>
-      <Route path="/admin/health"><AdminLayout><Health /></AdminLayout></Route>
-      <Route path="/admin/runs"><AdminLayout><Runs /></AdminLayout></Route>
-      <Route path="/admin/runs/:runId"><AdminLayout><RunTrace /></AdminLayout></Route>
-      <Route path="/admin/bridges-advanced"><AdminLayout><BridgesAdvanced /></AdminLayout></Route>
-      <Route path="/admin/jobs"><AdminLayout><Jobs /></AdminLayout></Route>
-      <Route path="/admin/hooks"><AdminLayout><Hooks /></AdminLayout></Route>
-      <Route path="/admin/missions"><AdminLayout><Missions /></AdminLayout></Route>
-      <Route path="/admin/missions/:id"><AdminLayout><MissionDetail /></AdminLayout></Route>
-
       {/* Onboarding — skip if already completed */}
       <Route path="/">
         {localStorage.getItem("anchor_onboarded") ? <Redirect to="/dashboard" /> : <Onboarding />}
