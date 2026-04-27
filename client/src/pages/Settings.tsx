@@ -33,7 +33,6 @@ const settingSections = [
   { id: "notifications", label: "Notifications", icon: Bell },
   { id: "appearance", label: "Appearance", icon: Palette },
   { id: "integrations", label: "Integrations", icon: Globe },
-  { id: "api", label: "API Keys", icon: Key },
 ];
 
 
@@ -92,9 +91,8 @@ export default function Settings() {
   const [cortexStatus, setCortexStatus] = useState<any>(null);
 
   // API Keys — loaded from API
-  const [apiKeys, setApiKeys] = useState<any[]>([]);
-  const [editingKey, setEditingKey] = useState<string | null>(null);
-  const [keyInput, setKeyInput] = useState("");
+  // Per-provider API key UI was removed — Anchor now uses a single
+  // operator-managed OpenRouter upstream. Users top up credits in /credits.
 
   // Integrations — loaded from API
   const [integrationStatus, setIntegrationStatus] = useState<any>(null);
@@ -136,19 +134,7 @@ export default function Settings() {
           setAppearance(settings.theme ?? "dark");
         }
 
-        if (cortex) {
-          setCortexStatus(cortex);
-          // Extract provider key statuses for API Keys section
-          const slots = cortex.providerSlots ?? [];
-          setApiKeys(slots.filter((s: any) =>
-            ["anthropic", "openai", "google", "deepseek", "qwen"].includes(s.id)
-          ).map((s: any) => ({
-            id: s.id,
-            provider: s.name,
-            configured: s.keySource !== "none",
-            keyMasked: s.keyMasked ?? null,
-          })));
-        }
+        if (cortex) setCortexStatus(cortex);
 
         if (intStatus) setIntegrationStatus(intStatus);
         if (localStatus) setLocalScanStatus(localStatus);
@@ -202,18 +188,6 @@ export default function Settings() {
     try {
       await api.updateSettings("appearance", { theme });
     } catch { toast.error("Failed to save appearance"); }
-  };
-
-  // Save API key
-  const handleSaveKey = async (providerId: string) => {
-    if (!keyInput.trim()) return;
-    try {
-      await api.setProviderKey(providerId, keyInput);
-      setApiKeys(prev => prev.map(k => k.id === providerId ? { ...k, configured: true, keyMasked: `${keyInput.slice(0, 6)}...` } : k));
-      setEditingKey(null);
-      setKeyInput("");
-      toast.success(`${providerId} key saved`);
-    } catch { toast.error("Failed to save key"); }
   };
 
   // Get active models for the models section
@@ -678,53 +652,6 @@ export default function Settings() {
               </motion.div>
             )}
 
-            {/* API Keys — real, functional */}
-            {activeSection === "api" && (
-              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-6">
-                <div className="glass rounded-xl p-6">
-                  <h2 className="text-lg font-semibold mb-2">API Keys</h2>
-                  <p className="text-xs text-muted-foreground mb-4">
-                    Manage API keys for AI model providers. Keys are stored securely on the server.
-                  </p>
-                  <div className="space-y-4">
-                    {apiKeys.map((key) => (
-                      <div key={key.id}>
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-3">
-                            <Key className={`h-4 w-4 ${key.configured ? "text-emerald-400" : "text-muted-foreground/30"}`} />
-                            <div>
-                              <span className="text-sm font-medium text-foreground">{key.provider}</span>
-                              <p className="text-[10px] text-muted-foreground mt-0.5">
-                                {key.configured ? key.keyMasked ?? "Configured" : "Not configured"}
-                              </p>
-                            </div>
-                          </div>
-                          <button onClick={() => { setEditingKey(editingKey === key.id ? null : key.id); setKeyInput(""); }}
-                            className="text-xs text-primary hover:text-primary/80 transition-colors">
-                            {key.configured ? "Update" : "Add Key"}
-                          </button>
-                        </div>
-                        {editingKey === key.id && (
-                          <div className="mt-2 flex gap-2">
-                            <input type="password" value={keyInput} onChange={(e) => setKeyInput(e.target.value)}
-                              placeholder={`Enter ${key.provider} API key...`}
-                              onKeyDown={(e) => e.key === "Enter" && handleSaveKey(key.id)}
-                              className="flex-1 glass rounded-lg px-3 py-2 text-xs text-foreground placeholder:text-muted-foreground/50 focus:outline-none" autoFocus />
-                            <button onClick={() => handleSaveKey(key.id)}
-                              className="px-3 py-2 rounded-lg bg-primary text-primary-foreground text-xs font-medium hover:bg-primary/90">
-                              Save
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                    {apiKeys.length === 0 && (
-                      <p className="text-xs text-muted-foreground">Configure model providers in the Admin console.</p>
-                    )}
-                  </div>
-                </div>
-              </motion.div>
-            )}
           </div>
         </div>
       </div>

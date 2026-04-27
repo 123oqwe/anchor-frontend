@@ -18,6 +18,7 @@ import {
   Workflow,
 } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import CreditBalance from "./CreditBalance";
 
 const navItems = [
   { path: "/dashboard", label: "Dashboard", icon: LayoutDashboard, description: "Human Graph & State" },
@@ -123,8 +124,9 @@ export default function AppLayout({ children }: { children: ReactNode }) {
           </div>
         </nav>
 
-        {/* Quick Command hint */}
-        <div className="px-3 pb-3">
+        {/* Footer: credit balance + ⌘K hint. Both stay readable when collapsed. */}
+        <div className="px-3 pb-3 space-y-1">
+          <CreditBalance collapsed={collapsed} />
           <AnimatePresence>
             {!collapsed && (
               <motion.div

@@ -1,11 +1,24 @@
 const BASE = "";
 
+/**
+ * 401 fan-out: any API call that comes back unauthenticated dispatches this
+ * event. The auth provider listens, clears its cached user, and the router
+ * re-renders into the Login page. Centralizing it here means callers don't
+ * have to special-case session-expired anywhere.
+ */
+export const UNAUTHENTICATED_EVENT = "anchor:unauthenticated";
+
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method,
+    credentials: "include",
     headers: body ? { "Content-Type": "application/json" } : {},
     body: body ? JSON.stringify(body) : undefined,
   });
+  if (res.status === 401) {
+    window.dispatchEvent(new Event(UNAUTHENTICATED_EVENT));
+    throw new Error("Unauthenticated");
+  }
   if (!res.ok) throw new Error(`${method} ${path} → ${res.status}`);
   return res.json();
 }
@@ -21,9 +34,14 @@ async function streamReq(
 ): Promise<{ fullText: string; id?: string }> {
   const res = await fetch(path, {
     method: "POST",
+    credentials: "include",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+  if (res.status === 401) {
+    window.dispatchEvent(new Event(UNAUTHENTICATED_EVENT));
+    throw new Error("Unauthenticated");
+  }
   if (!res.ok) throw new Error(`POST ${path} → ${res.status}`);
   if (!res.body) throw new Error("No response body");
 
