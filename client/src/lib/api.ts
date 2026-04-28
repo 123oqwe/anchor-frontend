@@ -295,4 +295,15 @@ export const api = {
     req<any>("POST", `/api/sessions/${sessionId}/steps`, body),
   skipStep: (sessionId: string, stepId: string) =>
     req<any>("DELETE", `/api/sessions/${sessionId}/steps/${stepId}`),
+
+  // ── 5 vertical Human Graphs (Relationship / Time / Work / Energy / Finance) ──
+  listGraphs: () => req<{ available: Array<{ id: string; name: string; path: string; status: string }> }>("GET", "/api/graphs"),
+  getGraphRelationship: () => req<any>("GET", "/api/graphs/relationship"),
+  getGraphTime:         () => req<any>("GET", "/api/graphs/time"),
+  getGraphWork:         () => req<any>("GET", "/api/graphs/work"),
+  getGraphEnergy:       () => req<any>("GET", "/api/graphs/energy"),
+  getGraphFinance:      () => req<any>("GET", "/api/graphs/finance"),
+  addFinanceTx: (data: { amountCents: number; category: string; merchant?: string; notes?: string; occurredAt?: string }) =>
+    req<any>("POST", "/api/graphs/finance/transactions", data),
+  deleteFinanceTx: (id: string) => req("DELETE", `/api/graphs/finance/transactions/${id}`),
 };

@@ -16,12 +16,14 @@ import {
   Sparkles,
   ShieldCheck,
   Workflow,
+  Network,
 } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import CreditBalance from "./CreditBalance";
 
 const navItems = [
   { path: "/dashboard", label: "Dashboard", icon: LayoutDashboard, description: "Human Graph & State" },
+  { path: "/graphs", label: "Graphs", icon: Network, description: "Relationships / Time / Work / Energy / Finance" },
   { path: "/scan", label: "Scan", icon: Sparkles, description: "Read your Mac, step by step" },
   { path: "/advisor", label: "Advisor", icon: MessageCircle, description: "Decision Conversations" },
   { path: "/twin", label: "Twin Agent", icon: Users, description: "Your Digital Twin" },

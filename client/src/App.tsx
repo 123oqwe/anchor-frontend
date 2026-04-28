@@ -27,6 +27,8 @@ import Scan from "./pages/Scan";
 import Approvals from "./pages/Approvals";
 import Sessions from "./pages/Sessions";
 import SessionDetail from "./pages/SessionDetail";
+import Graphs from "./pages/Graphs";
+import GraphDetail from "./pages/GraphDetail";
 
 function Router() {
   return (
@@ -49,6 +51,8 @@ function Router() {
               <AppLayout>
                 <Switch>
                   <Route path="/dashboard" component={Dashboard} />
+                  <Route path="/graphs" component={Graphs} />
+                  <Route path="/graphs/:id" component={GraphDetail} />
                   <Route path="/advisor" component={Advisor} />
                   <Route path="/twin" component={TwinAgent} />
                   <Route path="/agents" component={Agents} />
