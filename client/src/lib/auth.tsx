@@ -16,6 +16,7 @@
  */
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import { UNAUTHENTICATED_EVENT } from "./api";
+import { identify, resetIdentity, track } from "./analytics";
 
 export interface SessionUser {
   id: string;
@@ -39,9 +40,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const refresh = async () => {
     try {
       const res = await fetch("/api/auth/me", { credentials: "include" });
-      if (!res.ok) { setUser(null); return; }
+      if (!res.ok) { setUser(null); resetIdentity(); return; }
       const data = await res.json();
       setUser(data.user);
+      identify(data.user.id, data.user.email);
+      // signup_completed fires once per user-localStorage. PostHog dedupes
+      // by distinct_id; we tag with a localStorage flag to avoid re-firing
+      // on every /me refresh.
+      const flag = `posthog:signup_seen:${data.user.id}`;
+      if (!localStorage.getItem(flag)) {
+        track.signup_completed();
+        localStorage.setItem(flag, "1");
+      }
     } finally {
       setLoading(false);
     }
@@ -52,6 +62,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       await fetch("/api/auth/logout", { method: "POST", credentials: "include" });
     } finally {
       setUser(null);
+      resetIdentity();
     }
   };
 
