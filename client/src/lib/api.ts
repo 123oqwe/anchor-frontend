@@ -271,8 +271,8 @@ export const api = {
   getLocalScanStatus: () => req<any>("GET", "/api/integrations/local/status"),
   triggerLocalScan: () => req<any>("POST", "/api/integrations/local/scan", {}),
   triggerBrowserScan: () => req<any>("POST", "/api/integrations/local/scan/browser", {}),
-  triggerContactsScan: () => req<any>("POST", "/api/integrations/local/scan/contacts", {}),
-  triggerCalendarScan: () => req<any>("POST", "/api/integrations/local/scan/calendar", {}),
+  // (removed: triggerContactsScan / triggerCalendarScan — backend stubs were
+  //  deleted; contacts + calendar now come via MCP servers when connected)
 
   // Sprint B — #4 — Unified Approval Inbox
   listApprovals: (status: string = "pending", source?: string) =>
